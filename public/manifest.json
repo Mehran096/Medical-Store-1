@@ -1,0 +1,63 @@
+{
+  "id": "/",
+  "name": "Yasir Medical Store - یاسر میڈیکل سٹور",
+  "short_name": "Yasir Medical",
+  "description": "Yasir Medical Store - All medicines, tablets, syrups, patta, box, expiry alerts, fast billing - Offline PWA",
+  "start_url": "/login?utm_source=pwa",
+  "scope": "/",
+  "display": "standalone",
+  "display_override": ["standalone"],
+  "orientation": "any",
+  "background_color": "#ffffff",
+  "theme_color": "#0e7490",
+  "categories": ["business", "medical", "productivity"],
+  "lang": "en",
+  "icons": [
+    {
+      "src": "/icon-circle-180.png",
+      "sizes": "180x180",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/icon-circle-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/icon-circle-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ],
+  "shortcuts": [
+    {
+      "name": "Sell Medicine",
+      "url": "/dashboard/sales",
+      "description": "Quick medicine sale with patta/box",
+      "icons": [{ "src": "/icon-circle-180.png", "sizes": "180x180" }]
+    },
+    {
+      "name": "Medicines Stock",
+      "url": "/dashboard/products",
+      "description": "View stock in tablets/patta",
+      "icons": [{ "src": "/icon-circle-180.png", "sizes": "180x180" }]
+    },
+    {
+      "name": "Sales History",
+      "url": "/dashboard/sales/history",
+      "icons": [{ "src": "/icon-circle-180.png", "sizes": "180x180" }]
+    },
+    {
+      "name": "Khata / Customers",
+      "url": "/dashboard/customers",
+      "icons": [{ "src": "/icon-circle-180.png", "sizes": "180x180" }]
+    }
+  ],
+  "launch_handler": {
+    "client_mode": ["navigate-existing", "auto"]
+  },
+  "handle_links": "preferred"
+}
