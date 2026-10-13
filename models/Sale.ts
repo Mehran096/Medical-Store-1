@@ -1,173 +1,108 @@
 import { Schema, model, models, Types, type Model } from "mongoose";
 
-export type SaleBaseUnit = "tablet" | "ml" | "gram" | "piece";
+export type MainUnit = "box" | "bottle" | "tube" | "piece";
+export type SellUnit = "patta" | "half_patta" | "box" | "bottle" | "ml" | "tube" | "piece";
 
 export interface ISale {
   productId: Types.ObjectId;
   productName: string;
-  quantity: number;
-  price: number;
-  buyPrice: number;
-  sellPrice: number;
-  originalPrice: number;
-  discount: number;
-  profit: number;
+  mainUnit: MainUnit; // from Product - box/bottle/tube/piece
+  sellUnit: SellUnit; // decided at counter - patta/half_patta/box/bottle/ml/tube/piece
+  quantity: number; // in sellUnit - e.g., 1 patta, 0.5, 2 box
+  
+  pattaPerBox: number;
+  mlPerBottle: number;
+
+  buyPriceMain: number; // per Box/Bottle/Tube/Piece - from Product
+  sellPrice: number; // per Patta/HalfPatta/Box/Bottle/ml - EDITABLE at counter
   total: number;
-  soldBy?: string;
+  profit: number;
+
+  deductionMain: number; // deduct from stock - e.g., 0.1 Box for 1 Patta
+  deductionPatta: number;
+
   userId: Types.ObjectId;
-  localId?: string;
-  customerName?: string;
+  customerName?: string; 
   paymentType?: string;
-  synced?: boolean;
-  offlineCreatedAt?: Date;
-  
-  unit?: string;
-  baseUnit?: SaleBaseUnit;
-  tabletsPerPatta?: number;
-  pattaPerBox?: number;
-  qtyPerUnit?: number;
-  quantityInTablets: number;
-  totalTablets: number;
-  
-  subUnit?: string;
-  quantityInSub?: number;
-  isPartialSale?: boolean;
-  pricePerSub?: number;
-  
-  customerId?: Types.ObjectId;
-  paidAmount?: number;
-  pendingAmount?: number;
-  status?: "paid" | "pending" | "partial";
+  status?: "paid"|"pending"|"partial"; 
   isCredit?: boolean;
-  wusoolDate?: Date;
-  createdAt?: Date;
-  updatedAt?: Date;
+  localId?: string;
 }
 
-const SaleSchema = new Schema<ISale>(
-  {
-    productId: { type: Schema.Types.ObjectId, ref: "Product", required: true },
-    productName: { type: String, required: true, trim: true },
-    quantity: { type: Number, required: true, min: 0.001 },
-    price: { type: Number, required: true },
-    buyPrice: { type: Number, required: true, default: 0 },
-    sellPrice: { type: Number, required: true, default: 0 },
-    originalPrice: { type: Number, default: 0 },
-    discount: { type: Number, default: 0 },
-    profit: { type: Number, required: true, default: 0 },
-    total: { type: Number, required: true },
-    soldBy: { type: String, default: "shop" },
-    userId: { type: Schema.Types.ObjectId, ref: "User", required: true, index: true },
-    unit: { 
-      type: String, 
-      default: "tablet",
-      enum: ["tablet", "patta", "box", "half_patta", "syrup", "piece", "bottle", "capsule", "injection", "sachet", "tube", "ml", "liter", "gram", "kg"],
-    },
-    baseUnit: {
-      type: String,
-      enum: ["tablet", "ml", "gram", "piece"],
-      default: "tablet",
-    },
-    tabletsPerPatta: { type: Number, default: 10 },
-    pattaPerBox: { type: Number, default: 10 },
-    qtyPerUnit: { type: Number, default: 1 },
-    quantityInTablets: { type: Number, default: 0 },
-    totalTablets: { type: Number, default: 0 },
-    subUnit: { type: String, default: "" },
-    quantityInSub: { type: Number, default: 0 },
-    isPartialSale: { type: Boolean, default: false },
-    pricePerSub: { type: Number, default: 0 },
-    localId: { type: String, unique: true, sparse: true },
-    customerName: { type: String, default: "Walk-in" },
-    paymentType: { 
-      type: String, 
-      default: "cash", 
-      enum: ["cash", "credit", "udhar", "jazzcash", "easypaisa", "card"],
-    },
-    synced: { type: Boolean, default: true },
-    offlineCreatedAt: { type: Date },
-    customerId: { type: Schema.Types.ObjectId, ref: "Customer" },
-    paidAmount: { type: Number, default: 0 },
-    pendingAmount: { type: Number, default: 0 },
-    status: { type: String, enum: ["paid", "pending", "partial"], default: "paid" },
-    isCredit: { type: Boolean, default: false },
-    wusoolDate: { type: Date },
-  },
-  { timestamps: true }
-);
+const SaleSchema = new Schema<ISale>({
+  productId: { type: Schema.Types.ObjectId, ref: "Product", required: true },
+  productName: { type: String, required: true },
+  mainUnit: { type: String, enum: ["box","bottle","tube","piece"], required: true },
+  sellUnit: { type: String, enum: ["patta","half_patta","box","bottle","ml","tube","piece"], required: true, default: "patta" },
+  quantity: { type: Number, required: true, min: 0.001 },
 
-function detectBaseUnit(u: string): SaleBaseUnit {
-  if (["ml","liter","bottle","syrup"].includes(u)) return "ml";
-  if (["gram","kg","tube"].includes(u)) return "gram";
-  if (["piece","injection","capsule","sachet"].includes(u)) return "piece";
-  return "tablet";
-}
+  pattaPerBox: { type: Number, default: 10 },
+  mlPerBottle: { type: Number, default: 120 },
 
-SaleSchema.pre("validate", function () {
-  if (this.paymentType === "credit" || this.paymentType === "udhar") {
-    this.isCredit = true;
-    if (this.status === "paid") this.status = "pending";
-  } else {
-    this.isCredit = false;
-    this.status = "paid";
-  }
-  if (!this.originalPrice) this.originalPrice = this.sellPrice || this.price;
+  buyPriceMain: { type: Number, required: true },
+  sellPrice: { type: Number, required: true }, // EDITABLE
+  total: { type: Number, required: true },
+  profit: { type: Number, required: true },
+  deductionMain: { type: Number, default: 0 },
+  deductionPatta: { type: Number, default: 0 },
 
-  if (!this.baseUnit) this.baseUnit = detectBaseUnit(this.unit || "tablet");
+  userId: { type: Schema.Types.ObjectId, ref: "User", required: true, index: true },
+  customerName: { type: String, default: "Walk-in" },
+  paymentType: { type: String, default: "cash", enum: ["cash","credit","udhar","jazzcash","easypaisa","card"] },
+  status: { type: String, enum: ["paid","pending","partial"], default: "paid" },
+  isCredit: { type: Boolean, default: false },
+  localId: { type: String, sparse: true },
+}, { timestamps: true });
+
+SaleSchema.pre("validate", function(){
   const qty = this.quantity || 0;
-  const tpp = this.tabletsPerPatta || 10;
   const ppb = this.pattaPerBox || 10;
-  const qpu = this.qtyPerUnit || (this.baseUnit === "ml" ? 120 : this.baseUnit === "gram" ? 20 : 1);
+  const mlB = this.mlPerBottle || 120;
 
-  let totalBase = 0;
-  let pricePerUnit = 0;
-  const perBaseSell = this.sellPrice || 0;
+  let deductMain = 0;
+  let profit = 0;
+  let total = 0;
+  let deductPatta = 0;
 
-  if (this.baseUnit === "tablet") {
-    if (this.unit === 'tablet') totalBase = qty;
-    else if (this.unit === 'patta') totalBase = qty * tpp;
-    else if (this.unit === 'half_patta') totalBase = qty * (tpp/2);
-    else if (this.unit === 'box') totalBase = qty * tpp * ppb;
-    else totalBase = qty;
-  } else if (this.baseUnit === "ml" || this.baseUnit === "gram") {
-    if (["bottle","tube","box","liter","kg"].includes(this.unit || "")) totalBase = qty * qpu;
-    else totalBase = qty;
-  } else {
-    totalBase = qty;
-  }
-
-  this.quantityInSub = Math.round(totalBase);
-  if (this.baseUnit === "tablet") {
-    this.quantityInTablets = Math.round(totalBase);
-    this.totalTablets = Math.round(totalBase);
-  } else {
-    this.quantityInTablets = 0;
-    this.totalTablets = 0;
-  }
-
-  if (!this.price || this.price === 0) {
-    if (this.baseUnit === "tablet") {
-      if (this.unit === 'tablet') pricePerUnit = perBaseSell;
-      else if (this.unit === 'patta') pricePerUnit = perBaseSell * tpp;
-      else if (this.unit === 'half_patta') pricePerUnit = perBaseSell * (tpp/2);
-      else if (this.unit === 'box') pricePerUnit = perBaseSell * tpp * ppb;
-      else pricePerUnit = perBaseSell;
-    } else {
-      if (["bottle","tube","box"].includes(this.unit || "")) pricePerUnit = perBaseSell * qpu;
-      else pricePerUnit = perBaseSell;
+  if(this.mainUnit === "box"){
+    const buyPerPatta = this.buyPriceMain / ppb;
+    const buyPerHalf = buyPerPatta / 2;
+    if(this.sellUnit === "patta"){
+      deductMain = qty / ppb;
+      total = this.sellPrice * qty;
+      profit = (this.sellPrice - buyPerPatta) * qty;
+      deductPatta = qty;
+    } else if(this.sellUnit === "half_patta"){
+      deductMain = (qty * 0.5) / ppb;
+      total = this.sellPrice * qty;
+      profit = (this.sellPrice - buyPerHalf) * qty;
+      deductPatta = qty * 0.5;
+    } else { // box
+      deductMain = qty;
+      total = this.sellPrice * qty;
+      profit = (this.sellPrice - this.buyPriceMain) * qty;
+      deductPatta = qty * ppb;
     }
-    this.price = pricePerUnit;
+  } else {
+    if(this.sellUnit === "ml"){
+      const buyPerMl = this.buyPriceMain / mlB;
+      deductMain = qty / mlB;
+      total = this.sellPrice * qty;
+      profit = (this.sellPrice - buyPerMl) * qty;
+    } else {
+      deductMain = qty;
+      total = this.sellPrice * qty;
+      profit = (this.sellPrice - this.buyPriceMain) * qty;
+    }
   }
 
-  this.total = Math.round(this.price * this.quantity);
-  this.profit = Math.round(((this.sellPrice || 0) - (this.buyPrice || 0)) * totalBase);
+  this.deductionMain = Math.round(deductMain * 1000) / 1000;
+  this.deductionPatta = Math.round(deductPatta * 1000) / 1000;
+  this.total = Math.round(total);
+  this.profit = Math.round(profit);
 });
 
 SaleSchema.index({ userId: 1, createdAt: -1 });
-SaleSchema.index({ userId: 1, productName: 1 });
-SaleSchema.index({ productId: 1, createdAt: -1 });
-SaleSchema.index({ status: 1, customerName: 1 });
-SaleSchema.index({ isCredit: 1, createdAt: -1 });
 
 const Sale = (models.Sale as Model<ISale>) || model<ISale>("Sale", SaleSchema);
 export default Sale;

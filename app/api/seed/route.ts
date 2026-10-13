@@ -7,13 +7,15 @@ import mongoose from "mongoose";
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
-type MedicalUnit = "tablet" | "patta" | "half_patta" | "box" | "bottle" | "syrup" | "ml" | "liter" | "gram" | "kg" | "tube" | "sachet" | "piece" | "capsule" | "injection";
-type BaseUnit = "tablet" | "ml" | "gram" | "piece";
+type MainUnit = "box" | "bottle" | "tube" | "piece";
 
 type SeedMed = {
-  name: string; company: string; generic: string; unit: MedicalUnit; baseUnit: BaseUnit;
-  qtyPerUnit: number; buy: number; sell: number; stock: number; // stock in baseUnit
-  expiryMonths: number; // months from now
+  name: string; company: string; generic: string;
+  mainUnit: MainUnit;
+  pattaPerBox: number; mlPerBottle: number;
+  buyPerMain: number; sellPerDefault: number; // sell per Patta if box, per Bottle if bottle
+  stock: number; // in mainUnit ONLY
+  expiryMonths: number;
 };
 
 function randomExpiry(months: number): Date {
@@ -23,120 +25,94 @@ function randomExpiry(months: number): Date {
   return d;
 }
 
-// 50 REAL MEDICINES — V11 MIXED TABLET / SYRUP / TUBE / INJECTION / SACHET
+// 50 REAL MEDICINES — V14.2: stock ONLY in box/bottle/tube/piece
 const MEDICINES_50: SeedMed[] = [
-  // Tablets
-  { name: "Panadol 500mg", company: "GSK", generic: "Paracetamol", unit: "tablet", baseUnit: "tablet", qtyPerUnit: 10, buy: 2.8, sell: 3.5, stock: 500, expiryMonths: 24 },
-  { name: "Panadol Extra", company: "GSK", generic: "Paracetamol+Caffeine", unit: "tablet", baseUnit: "tablet", qtyPerUnit: 10, buy: 3.8, sell: 4.5, stock: 400, expiryMonths: 22 },
-  { name: "Brufen 400mg", company: "Abbott", generic: "Ibuprofen", unit: "tablet", baseUnit: "tablet", qtyPerUnit: 10, buy: 4.5, sell: 5.5, stock: 300, expiryMonths: 24 },
-  { name: "Ponstan Forte 500mg", company: "Pfizer", generic: "Mefenamic Acid", unit: "tablet", baseUnit: "tablet", qtyPerUnit: 10, buy: 5.5, sell: 7.0, stock: 250, expiryMonths: 18 },
-  { name: "Augmentin 625mg", company: "GSK", generic: "Co-Amoxiclav", unit: "tablet", baseUnit: "tablet", qtyPerUnit: 10, buy: 28, sell: 32, stock: 150, expiryMonths: 20 },
-  { name: "Amoxil 500mg", company: "GSK", generic: "Amoxicillin", unit: "tablet", baseUnit: "tablet", qtyPerUnit: 10, buy: 8.5, sell: 11, stock: 200, expiryMonths: 18 },
-  { name: "Azomax 500mg", company: "Pfizer", generic: "Azithromycin", unit: "tablet", baseUnit: "tablet", qtyPerUnit: 10, buy: 18, sell: 22, stock: 180, expiryMonths: 24 },
-  { name: "Cefspan 400mg", company: "Barrett", generic: "Cefixime", unit: "tablet", baseUnit: "tablet", qtyPerUnit: 10, buy: 19.5, sell: 24, stock: 160, expiryMonths: 20 },
-  { name: "Velosef 500mg", company: "GSK", generic: "Cephradine", unit: "tablet", baseUnit: "tablet", qtyPerUnit: 10, buy: 11, sell: 13.5, stock: 200, expiryMonths: 18 },
-  { name: "Flagyl 400mg", company: "Sanofi", generic: "Metronidazole", unit: "tablet", baseUnit: "tablet", qtyPerUnit: 10, buy: 2.2, sell: 3.0, stock: 400, expiryMonths: 30 },
-  { name: "Risek 20mg", company: "Getz", generic: "Omeprazole", unit: "capsule", baseUnit: "piece", qtyPerUnit: 14, buy: 8.5, sell: 11, stock: 350, expiryMonths: 24 },
-  { name: "Risek 40mg", company: "Getz", generic: "Omeprazole", unit: "capsule", baseUnit: "piece", qtyPerUnit: 14, buy: 14.5, sell: 17.5, stock: 250, expiryMonths: 24 },
-  { name: "Lowplat 75mg", company: "Getz", generic: "Clopidogrel", unit: "tablet", baseUnit: "tablet", qtyPerUnit: 10, buy: 9.5, sell: 12, stock: 200, expiryMonths: 22 },
-  { name: "Surbex Z", company: "Abbott", generic: "Multivitamin", unit: "tablet", baseUnit: "tablet", qtyPerUnit: 10, buy: 22, sell: 26, stock: 200, expiryMonths: 18 },
-  { name: "CaC-1000 Plus", company: "GSK", generic: "Calcium+Vit D", unit: "tablet", baseUnit: "tablet", qtyPerUnit: 10, buy: 38, sell: 43, stock: 150, expiryMonths: 20 },
-  { name: "Folic Acid 5mg", company: "Zafa", generic: "Folic Acid", unit: "tablet", baseUnit: "tablet", qtyPerUnit: 10, buy: 1.2, sell: 1.8, stock: 500, expiryMonths: 36 },
-  { name: "Motilium 10mg", company: "Janssen", generic: "Domperidone", unit: "tablet", baseUnit: "tablet", qtyPerUnit: 10, buy: 3.8, sell: 5.0, stock: 250, expiryMonths: 24 },
-  { name: "Arinac Forte", company: "Abbott", generic: "Ibuprofen+Pseudoephedrine", unit: "tablet", baseUnit: "tablet", qtyPerUnit: 10, buy: 3.5, sell: 4.5, stock: 300, expiryMonths: 24 },
-  { name: "Rigix 10mg", company: "Getz", generic: "Cetirizine", unit: "tablet", baseUnit: "tablet", qtyPerUnit: 10, buy: 2.2, sell: 3.0, stock: 400, expiryMonths: 24 },
-  { name: "Concor 5mg", company: "Merck", generic: "Bisoprolol", unit: "tablet", baseUnit: "tablet", qtyPerUnit: 10, buy: 16.5, sell: 19.5, stock: 150, expiryMonths: 20 },
+  // box -> worker adds 1 Box = 10 Patta, default sell per Patta
+  { name: "Panadol 500mg", company: "GSK", generic: "Paracetamol", mainUnit: "box", pattaPerBox: 10, mlPerBottle: 120, buyPerMain: 280, sellPerDefault: 35, stock: 50, expiryMonths: 24 },
+  { name: "Panadol Extra", company: "GSK", generic: "Paracetamol+Caffeine", mainUnit: "box", pattaPerBox: 10, mlPerBottle: 120, buyPerMain: 380, sellPerDefault: 45, stock: 40, expiryMonths: 22 },
+  { name: "Brufen 400mg", company: "Abbott", generic: "Ibuprofen", mainUnit: "box", pattaPerBox: 10, mlPerBottle: 120, buyPerMain: 450, sellPerDefault: 55, stock: 30, expiryMonths: 24 },
+  { name: "Ponstan Forte 500mg", company: "Pfizer", generic: "Mefenamic Acid", mainUnit: "box", pattaPerBox: 10, mlPerBottle: 120, buyPerMain: 550, sellPerDefault: 70, stock: 25, expiryMonths: 18 },
+  { name: "Augmentin 625mg", company: "GSK", generic: "Co-Amoxiclav", mainUnit: "box", pattaPerBox: 10, mlPerBottle: 120, buyPerMain: 2800, sellPerDefault: 320, stock: 15, expiryMonths: 20 },
+  { name: "Amoxil 500mg", company: "GSK", generic: "Amoxicillin", mainUnit: "box", pattaPerBox: 10, mlPerBottle: 120, buyPerMain: 850, sellPerDefault: 110, stock: 20, expiryMonths: 18 },
+  { name: "Azomax 500mg", company: "Pfizer", generic: "Azithromycin", mainUnit: "box", pattaPerBox: 10, mlPerBottle: 120, buyPerMain: 1800, sellPerDefault: 220, stock: 18, expiryMonths: 24 },
+  { name: "Cefspan 400mg", company: "Barrett", generic: "Cefixime", mainUnit: "box", pattaPerBox: 10, mlPerBottle: 120, buyPerMain: 1950, sellPerDefault: 240, stock: 16, expiryMonths: 20 },
+  { name: "Velosef 500mg", company: "GSK", generic: "Cephradine", mainUnit: "box", pattaPerBox: 10, mlPerBottle: 120, buyPerMain: 1100, sellPerDefault: 135, stock: 20, expiryMonths: 18 },
+  { name: "Flagyl 400mg", company: "Sanofi", generic: "Metronidazole", mainUnit: "box", pattaPerBox: 10, mlPerBottle: 120, buyPerMain: 220, sellPerDefault: 30, stock: 40, expiryMonths: 30 },
+  { name: "Risek 20mg", company: "Getz", generic: "Omeprazole", mainUnit: "box", pattaPerBox: 10, mlPerBottle: 120, buyPerMain: 850, sellPerDefault: 110, stock: 35, expiryMonths: 24 },
+  { name: "Risek 40mg", company: "Getz", generic: "Omeprazole", mainUnit: "box", pattaPerBox: 10, mlPerBottle: 120, buyPerMain: 1450, sellPerDefault: 175, stock: 25, expiryMonths: 24 },
+  { name: "Lowplat 75mg", company: "Getz", generic: "Clopidogrel", mainUnit: "box", pattaPerBox: 10, mlPerBottle: 120, buyPerMain: 950, sellPerDefault: 120, stock: 20, expiryMonths: 22 },
+  { name: "Surbex Z", company: "Abbott", generic: "Multivitamin", mainUnit: "box", pattaPerBox: 10, mlPerBottle: 120, buyPerMain: 2200, sellPerDefault: 260, stock: 20, expiryMonths: 18 },
+  { name: "CaC-1000 Plus", company: "GSK", generic: "Calcium+Vit D", mainUnit: "box", pattaPerBox: 10, mlPerBottle: 120, buyPerMain: 3800, sellPerDefault: 430, stock: 15, expiryMonths: 20 },
+  { name: "Folic Acid 5mg", company: "Zafa", generic: "Folic Acid", mainUnit: "box", pattaPerBox: 10, mlPerBottle: 120, buyPerMain: 120, sellPerDefault: 18, stock: 50, expiryMonths: 36 },
+  { name: "Motilium 10mg", company: "Janssen", generic: "Domperidone", mainUnit: "box", pattaPerBox: 10, mlPerBottle: 120, buyPerMain: 380, sellPerDefault: 50, stock: 25, expiryMonths: 24 },
+  { name: "Arinac Forte", company: "Abbott", generic: "Ibuprofen+Pseudoephedrine", mainUnit: "box", pattaPerBox: 10, mlPerBottle: 120, buyPerMain: 350, sellPerDefault: 45, stock: 30, expiryMonths: 24 },
+  { name: "Rigix 10mg", company: "Getz", generic: "Cetirizine", mainUnit: "box", pattaPerBox: 10, mlPerBottle: 120, buyPerMain: 220, sellPerDefault: 30, stock: 40, expiryMonths: 24 },
+  { name: "Concor 5mg", company: "Merck", generic: "Bisoprolol", mainUnit: "box", pattaPerBox: 10, mlPerBottle: 120, buyPerMain: 1650, sellPerDefault: 195, stock: 15, expiryMonths: 20 },
 
-  // Syrups / Liquids - base ml
-  { name: "Brufen Syrup 100ml", company: "Abbott", generic: "Ibuprofen", unit: "bottle", baseUnit: "ml", qtyPerUnit: 100, buy: 0.65, sell: 0.85, stock: 1500, expiryMonths: 18 },
-  { name: "Panadol Syrup 60ml", company: "GSK", generic: "Paracetamol", unit: "bottle", baseUnit: "ml", qtyPerUnit: 60, buy: 0.90, sell: 1.15, stock: 1200, expiryMonths: 18 },
-  { name: "Hydryllin Syrup 120ml", company: "Searle", generic: "Diphenhydramine", unit: "bottle", baseUnit: "ml", qtyPerUnit: 120, buy: 0.62, sell: 0.79, stock: 1800, expiryMonths: 16 },
-  { name: "Mucaine Syrup 120ml", company: "Pfizer", generic: "Oxethazaine+Aluminium", unit: "bottle", baseUnit: "ml", qtyPerUnit: 120, buy: 0.91, sell: 1.12, stock: 1440, expiryMonths: 20 },
-  { name: "Gaviscon Syrup 120ml", company: "Reckitt", generic: "Sodium Alginate", unit: "bottle", baseUnit: "ml", qtyPerUnit: 120, buy: 1.54, sell: 1.83, stock: 1200, expiryMonths: 14 },
-  { name: "Hydryllin DM Syrup 120ml", company: "Searle", generic: "Dextromethorphan", unit: "bottle", baseUnit: "ml", qtyPerUnit: 120, buy: 0.70, sell: 0.95, stock: 1000, expiryMonths: 18 },
-  { name: "Lysovit Syrup 120ml", company: "GSK", generic: "Multivitamin", unit: "bottle", baseUnit: "ml", qtyPerUnit: 120, buy: 1.20, sell: 1.50, stock: 1100, expiryMonths: 20 },
-  { name: "Entamizole Syrup 60ml", company: "Sanofi", generic: "Metronidazole", unit: "bottle", baseUnit: "ml", qtyPerUnit: 60, buy: 0.55, sell: 0.75, stock: 900, expiryMonths: 22 },
+  // bottle
+  { name: "Brufen Syrup 100ml", company: "Abbott", generic: "Ibuprofen", mainUnit: "bottle", pattaPerBox: 10, mlPerBottle: 100, buyPerMain: 65, sellPerDefault: 85, stock: 15, expiryMonths: 18 },
+  { name: "Panadol Syrup 60ml", company: "GSK", generic: "Paracetamol", mainUnit: "bottle", pattaPerBox: 10, mlPerBottle: 60, buyPerMain: 54, sellPerDefault: 69, stock: 20, expiryMonths: 18 },
+  { name: "Hydryllin Syrup 120ml", company: "Searle", generic: "Diphenhydramine", mainUnit: "bottle", pattaPerBox: 10, mlPerBottle: 120, buyPerMain: 75, sellPerDefault: 95, stock: 15, expiryMonths: 16 },
+  { name: "Mucaine Syrup 120ml", company: "Pfizer", generic: "Oxethazaine", mainUnit: "bottle", pattaPerBox: 10, mlPerBottle: 120, buyPerMain: 110, sellPerDefault: 135, stock: 12, expiryMonths: 20 },
+  { name: "Gaviscon Syrup 120ml", company: "Reckitt", generic: "Sodium Alginate", mainUnit: "bottle", pattaPerBox: 10, mlPerBottle: 120, buyPerMain: 185, sellPerDefault: 220, stock: 10, expiryMonths: 14 },
+  { name: "Lysovit Syrup 120ml", company: "GSK", generic: "Multivitamin", mainUnit: "bottle", pattaPerBox: 10, mlPerBottle: 120, buyPerMain: 144, sellPerDefault: 180, stock: 11, expiryMonths: 20 },
+  { name: "Entamizole Syrup 60ml", company: "Sanofi", generic: "Metronidazole", mainUnit: "bottle", pattaPerBox: 10, mlPerBottle: 60, buyPerMain: 33, sellPerDefault: 45, stock: 15, expiryMonths: 22 },
+  { name: "Quench Eye Drops 10ml", company: "Sante", generic: "CMC", mainUnit: "bottle", pattaPerBox: 10, mlPerBottle: 10, buyPerMain: 95, sellPerDefault: 120, stock: 50, expiryMonths: 12 },
+  { name: "Betnesol-N Eye Drops 10ml", company: "GSK", generic: "Betamethasone", mainUnit: "bottle", pattaPerBox: 10, mlPerBottle: 10, buyPerMain: 45, sellPerDefault: 60, stock: 40, expiryMonths: 10 },
 
-  // Creams / Tubes - base gram
-  { name: "Betnovate-N Cream 20g", company: "GSK", generic: "Betamethasone+Neomycin", unit: "tube", baseUnit: "gram", qtyPerUnit: 20, buy: 2.25, sell: 3.0, stock: 600, expiryMonths: 24 },
-  { name: "Polyfax Skin Oint 20g", company: "GSK", generic: "Polymyxin+Bacitracin", unit: "tube", baseUnit: "gram", qtyPerUnit: 20, buy: 2.75, sell: 3.5, stock: 400, expiryMonths: 22 },
-  { name: "Betaderm Cream 20g", company: "Atco", generic: "Betamethasone", unit: "tube", baseUnit: "gram", qtyPerUnit: 20, buy: 2.0, sell: 2.8, stock: 350, expiryMonths: 24 },
-  { name: "Dermovate Cream 20g", company: "GSK", generic: "Clobetasol", unit: "tube", baseUnit: "gram", qtyPerUnit: 20, buy: 3.5, sell: 4.5, stock: 300, expiryMonths: 20 },
-  { name: "Soframycin Skin Cream 20g", company: "Sanofi", generic: "Framycetin", unit: "tube", baseUnit: "gram", qtyPerUnit: 20, buy: 1.80, sell: 2.40, stock: 400, expiryMonths: 24 },
+  // tube
+  { name: "Betnovate-N Cream 20g", company: "GSK", generic: "Betamethasone", mainUnit: "tube", pattaPerBox: 10, mlPerBottle: 20, buyPerMain: 45, sellPerDefault: 60, stock: 30, expiryMonths: 24 },
+  { name: "Polyfax Skin Oint 20g", company: "GSK", generic: "Polymyxin", mainUnit: "tube", pattaPerBox: 10, mlPerBottle: 20, buyPerMain: 55, sellPerDefault: 70, stock: 20, expiryMonths: 22 },
+  { name: "Dermovate Cream 20g", company: "GSK", generic: "Clobetasol", mainUnit: "tube", pattaPerBox: 10, mlPerBottle: 20, buyPerMain: 70, sellPerDefault: 90, stock: 15, expiryMonths: 20 },
+  { name: "Soframycin Cream 20g", company: "Sanofi", generic: "Framycetin", mainUnit: "tube", pattaPerBox: 10, mlPerBottle: 20, buyPerMain: 36, sellPerDefault: 48, stock: 20, expiryMonths: 24 },
 
-  // Sachets / Others - base piece / ml
-  { name: "ORS Sachet Nimkol", company: "GSK", generic: "Oral Rehydration Salt", unit: "sachet", baseUnit: "piece", qtyPerUnit: 1, buy: 18, sell: 25, stock: 800, expiryMonths: 24 },
-  { name: "Enervon Sachet", company: "Abbott", generic: "Multivitamin", unit: "sachet", baseUnit: "piece", qtyPerUnit: 1, buy: 22, sell: 28, stock: 500, expiryMonths: 18 },
-  { name: "Quench Eye Drops 10ml", company: "Sante", generic: "CMC", unit: "bottle", baseUnit: "ml", qtyPerUnit: 10, buy: 9.5, sell: 12, stock: 500, expiryMonths: 12 },
-  { name: "Betnesol-N Eye Drops 10ml", company: "GSK", generic: "Betamethasone+Neomycin", unit: "bottle", baseUnit: "ml", qtyPerUnit: 10, buy: 4.5, sell: 6.0, stock: 400, expiryMonths: 10 },
-  { name: "Tobrex Eye Drops 5ml", company: "Alcon", generic: "Tobramycin", unit: "bottle", baseUnit: "ml", qtyPerUnit: 5, buy: 18, sell: 22, stock: 250, expiryMonths: 8 },
+  // piece
+  { name: "ORS Sachet", company: "GSK", generic: "Oral Rehydration", mainUnit: "piece", pattaPerBox: 10, mlPerBottle: 120, buyPerMain: 18, sellPerDefault: 25, stock: 800, expiryMonths: 24 },
+  { name: "Enervon Sachet", company: "Abbott", generic: "Multivitamin", mainUnit: "piece", pattaPerBox: 10, mlPerBottle: 120, buyPerMain: 22, sellPerDefault: 28, stock: 500, expiryMonths: 18 },
+  { name: "Jetepar Injection", company: "Abbott", generic: "Liver Extract", mainUnit: "piece", pattaPerBox: 10, mlPerBottle: 120, buyPerMain: 28, sellPerDefault: 38, stock: 200, expiryMonths: 24 },
+  { name: "Decadron Injection", company: "Zafa", generic: "Dexamethasone", mainUnit: "piece", pattaPerBox: 10, mlPerBottle: 120, buyPerMain: 18, sellPerDefault: 28, stock: 300, expiryMonths: 30 },
+  { name: "Voren Injection 75mg", company: "Novartis", generic: "Diclofenac", mainUnit: "piece", pattaPerBox: 10, mlPerBottle: 120, buyPerMain: 15, sellPerDefault: 22, stock: 400, expiryMonths: 24 },
+  { name: "Transamine 500mg Inj", company: "Hilton", generic: "Tranexamic Acid", mainUnit: "piece", pattaPerBox: 10, mlPerBottle: 120, buyPerMain: 42, sellPerDefault: 55, stock: 150, expiryMonths: 20 },
+  { name: "Gravinate Injection", company: "Pfizer", generic: "Dimenhydrinate", mainUnit: "piece", pattaPerBox: 10, mlPerBottle: 120, buyPerMain: 12, sellPerDefault: 18, stock: 250, expiryMonths: 22 },
 
-  // Injections - base piece
-  { name: "Jetepar Injection", company: "Abbott", generic: "Liver Extract", unit: "injection", baseUnit: "piece", qtyPerUnit: 1, buy: 28, sell: 38, stock: 200, expiryMonths: 24 },
-  { name: "Decadron Injection", company: "Zafa", generic: "Dexamethasone", unit: "injection", baseUnit: "piece", qtyPerUnit: 1, buy: 18, sell: 28, stock: 300, expiryMonths: 30 },
-  { name: "Voren Injection 75mg", company: "Novartis", generic: "Diclofenac", unit: "injection", baseUnit: "piece", qtyPerUnit: 1, buy: 15, sell: 22, stock: 400, expiryMonths: 24 },
-  { name: "Transamine 500mg Inj", company: "Hilton", generic: "Tranexamic Acid", unit: "injection", baseUnit: "piece", qtyPerUnit: 1, buy: 42, sell: 55, stock: 150, expiryMonths: 20 },
-  { name: "Gravinate Injection", company: "Pfizer", generic: "Dimenhydrinate", unit: "injection", baseUnit: "piece", qtyPerUnit: 1, buy: 12, sell: 18, stock: 250, expiryMonths: 22 },
-
-  // Expiring soon for testing expiry feature
-  { name: "Expired Test - Flagyl", company: "Sanofi", generic: "Metronidazole", unit: "tablet", baseUnit: "tablet", qtyPerUnit: 10, buy: 2.2, sell: 3.0, stock: 50, expiryMonths: -1 },
-  { name: "Expiring Soon - Panadol", company: "GSK", generic: "Paracetamol", unit: "tablet", baseUnit: "tablet", qtyPerUnit: 10, buy: 2.8, sell: 3.5, stock: 100, expiryMonths: 1 },
-  { name: "Expiring Soon - Brufen Syrup", company: "Abbott", generic: "Ibuprofen", unit: "bottle", baseUnit: "ml", qtyPerUnit: 100, buy: 0.65, sell: 0.85, stock: 1000, expiryMonths: 2 },
-  { name: "Cipralex 10mg", company: "Lundbeck", generic: "Escitalopram", unit: "tablet", baseUnit: "tablet", qtyPerUnit: 10, buy: 29.5, sell: 34, stock: 100, expiryMonths: 14 },
-  { name: "Getryl 2mg", company: "Getz", generic: "Glimepiride", unit: "tablet", baseUnit: "tablet", qtyPerUnit: 10, buy: 5.5, sell: 7.0, stock: 250, expiryMonths: 18 },
-  { name: "Ventolin 2mg", company: "GSK", generic: "Salbutamol", unit: "tablet", baseUnit: "tablet", qtyPerUnit: 10, buy: 1.8, sell: 2.5, stock: 350, expiryMonths: 20 },
+  { name: "Expired Test - Flagyl", company: "Sanofi", generic: "Metronidazole", mainUnit: "box", pattaPerBox: 10, mlPerBottle: 120, buyPerMain: 220, sellPerDefault: 30, stock: 5, expiryMonths: -1 },
+  { name: "Expiring Soon - Panadol", company: "GSK", generic: "Paracetamol", mainUnit: "box", pattaPerBox: 10, mlPerBottle: 120, buyPerMain: 280, sellPerDefault: 35, stock: 10, expiryMonths: 1 },
+  { name: "Expiring Soon - Brufen Syrup", company: "Abbott", generic: "Ibuprofen", mainUnit: "bottle", pattaPerBox: 10, mlPerBottle: 100, buyPerMain: 65, sellPerDefault: 85, stock: 10, expiryMonths: 2 },
+  { name: "Cipralex 10mg", company: "Lundbeck", generic: "Escitalopram", mainUnit: "box", pattaPerBox: 10, mlPerBottle: 120, buyPerMain: 2950, sellPerDefault: 340, stock: 10, expiryMonths: 14 },
+  { name: "Getryl 2mg", company: "Getz", generic: "Glimepiride", mainUnit: "box", pattaPerBox: 10, mlPerBottle: 120, buyPerMain: 550, sellPerDefault: 70, stock: 25, expiryMonths: 18 },
+  { name: "Ventolin 2mg", company: "GSK", generic: "Salbutamol", mainUnit: "box", pattaPerBox: 10, mlPerBottle: 120, buyPerMain: 180, sellPerDefault: 25, stock: 35, expiryMonths: 20 },
 ];
 
 export async function POST() {
   try {
     await dbConnect();
     const owner = await User.findOne({ role: "owner" }).sort({ createdAt: 1 });
-    if (!owner) {
-      return NextResponse.json({ success: false, error: "Create owner first" }, { status: 400 });
-    }
+    if (!owner) return NextResponse.json({ success: false, error: "Create owner first" }, { status: 400 });
     const userId = owner._id as mongoose.Types.ObjectId;
 
     await Product.deleteMany({ userId });
 
-    const products = MEDICINES_50.map((m) => {
-      const expiryDate = randomExpiry(m.expiryMonths);
-      const buyPerBase = m.buy;
-      const sellPerBase = m.sell;
-      const isTablet = m.baseUnit === "tablet";
-      const isPiece = m.baseUnit === "piece";
+    const products = MEDICINES_50.map((m) => ({
+      name: m.name,
+      company: m.company,
+      generic: m.generic,
+      batchNo: `YM-${Math.floor(1000 + Math.random() * 9000)}`,
+      expiryDate: randomExpiry(m.expiryMonths),
+      rack: `Rack ${String.fromCharCode(65 + Math.floor(Math.random() * 3))}${Math.floor(Math.random() * 5) + 1}`,
 
-      return {
-        name: m.name,
-        company: m.company,
-        generic: m.generic,
-        batchNo: `YM-${Math.floor(1000 + Math.random() * 9000)}`,
-        expiryDate, // ✅ V11 field
-        rack: `Rack ${String.fromCharCode(65 + Math.floor(Math.random() * 3))}${Math.floor(Math.random() * 5) + 1}`,
+      // V14.2 FINAL fields - NO sellUnit
+      mainUnit: m.mainUnit, // box/bottle/tube/piece ONLY
+      pattaPerBox: m.pattaPerBox,
+      mlPerBottle: m.mlPerBottle,
+      buyPrice: m.buyPerMain, // per Box/Bottle
+      sellPrice: m.sellPerDefault, // per Patta if box else per Bottle/Tube/Piece - default, editable at counter
+      stock: m.stock, // in mainUnit ONLY
 
-        // ✅ V11 medical model
-        unit: m.unit,
-        baseUnit: m.baseUnit,
-        qtyPerUnit: m.qtyPerUnit,
-        subUnit: m.baseUnit,
-        stock: m.stock, // stock in baseUnit (tablet count / ml / gram / piece)
-
-        tabletsPerPatta: isTablet? 10 : isPiece? 1 : 10,
-        pattaPerBox: isTablet? 10 : 1,
-
-        // pricing per baseUnit
-        price: sellPerBase,
-        buyPrice: buyPerBase,
-        sellPrice: sellPerBase,
-
-        userId,
-        synced: true,
-        lastSyncedAt: new Date(),
-      };
-    });
+      userId,
+    }));
 
     const inserted = await Product.insertMany(products);
 
-    // counts for response
     const expired = products.filter((p) => p.expiryDate < new Date()).length;
     const expSoon = products.filter((p) => {
       const diff = (p.expiryDate.getTime() - Date.now()) / (1000 * 3600 * 24);
@@ -146,12 +122,12 @@ export async function POST() {
     return NextResponse.json({
       success: true,
       count: inserted.length,
-      message: `Yasir Medical V11 - Seeded ${inserted.length} medicines | ${expired} expired | ${expSoon} expiring soon`,
+      message: `Yasir Medical V14.2 FINAL - Seeded ${inserted.length} | ${expired} expired | ${expSoon} expiring | Box=10 Patta • Sell Patta editable`,
       breakdown: {
-        tablet: MEDICINES_50.filter((m) => m.baseUnit === "tablet").length,
-        ml: MEDICINES_50.filter((m) => m.baseUnit === "ml").length,
-        gram: MEDICINES_50.filter((m) => m.baseUnit === "gram").length,
-        piece: MEDICINES_50.filter((m) => m.baseUnit === "piece").length,
+        box: MEDICINES_50.filter((m) => m.mainUnit === "box").length,
+        bottle: MEDICINES_50.filter((m) => m.mainUnit === "bottle").length,
+        tube: MEDICINES_50.filter((m) => m.mainUnit === "tube").length,
+        piece: MEDICINES_50.filter((m) => m.mainUnit === "piece").length,
         expired,
         expiringSoon: expSoon,
       },
