@@ -141,6 +141,7 @@ export default function ProductsPage() {
   }, [search, page]);
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     if (isOnline) void syncPendingProducts();
   }, [isOnline, syncPendingProducts]);
 
