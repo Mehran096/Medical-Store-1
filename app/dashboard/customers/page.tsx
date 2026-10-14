@@ -1,5 +1,6 @@
 "use client";
-import { useEffect, useState } from "react";
+import { useEffect, useState, useMemo, useCallback } from "react";
+import { offlineDB } from "@/lib/offline-db";
 
 type WusoolEntry = {
   amount: number;
@@ -11,11 +12,10 @@ type Bill = {
   _id: string;
   productName: string;
   quantity: number;
-  quantityInTablets?: number;
-  totalTablets?: number;
-  unit: string;
-  tabletsPerPatta?: number;
+  mainUnit: string;
+  sellUnit: string;
   pattaPerBox?: number;
+  mlPerBottle?: number;
   total: number;
   createdAt?: string;
 };
@@ -44,11 +44,7 @@ type Customer = {
 };
 
 type CustomerApi = Customer & { totalUdhar: number };
-
-type CustomerDetailResponse = {
-  customer: Customer;
-  bills: Bill[];
-};
+type CustomerDetailResponse = { customer: Customer; bills: Bill[] };
 
 export default function CustomersPage() {
   const [customers, setCustomers] = useState<Customer[]>([]);
@@ -62,7 +58,7 @@ export default function CustomersPage() {
   const [billsMap, setBillsMap] = useState<Record<string, Bill[]>>({});
   const [billsLoading, setBillsLoading] = useState<string | null>(null);
 
-  const fetchAndSet = async (searchTerm: string) => {
+  const fetchAndSet = useCallback(async (searchTerm: string) => {
     try {
       const res = await fetch(`/api/customers?search=${encodeURIComponent(searchTerm)}`);
       const data = (await res.json()) as { customers?: CustomerApi[] };
@@ -79,63 +75,101 @@ export default function CustomersPage() {
         return new Date(b.lastUdharDate || b.createdAt || 0).getTime() - new Date(a.lastUdharDate || a.createdAt || 0).getTime();
       });
       setCustomers(sorted);
-    } catch {}
-  };
+    } catch {
+      try {
+        const cached = await offlineDB.sales.toArray();
+        const map = new Map<string, Customer>();
+        cached.forEach((s) => {
+          const sAny = s as unknown as { customerName?: string; status?: string; total: number; localId: string };
+          if (!sAny.customerName || sAny.customerName === "Walk-in") return;
+          const key = sAny.customerName.trim().toLowerCase();
+          if (!map.has(key)) {
+            map.set(key, {
+              _id: key,
+              name: sAny.customerName,
+              phone: "",
+              village: "",
+              totalUdhar: 0,
+              totalBusiness: 0,
+              isPaid: false,
+              saleIds: [],
+            });
+          }
+          const c = map.get(key);
+          if (c) {
+            c.totalUdhar += sAny.status === "pending"? sAny.total : 0;
+            c.totalBusiness += sAny.total;
+            c.saleIds?.push(sAny.localId);
+          }
+        });
+        setCustomers(Array.from(map.values()));
+      } catch {}
+    }
+  }, []);
 
   useEffect(() => {
-    let active = true;
-    const load = async () => {
-      if (!active) return;
-      await fetchAndSet(search);
-    };
-    void load();
-    return () => {
-      active = false;
-    };
-  }, [search]);
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    void fetchAndSet(search);
+  }, [search, fetchAndSet]);
 
   useEffect(() => {
     if (!expandedId) return;
     if (billsMap[expandedId]) return;
+    let cancelled = false;
     const fetchBills = async () => {
       setBillsLoading(expandedId);
       try {
         const res = await fetch(`/api/customers/${expandedId}`);
         if (!res.ok) throw new Error("Failed");
         const data = (await res.json()) as CustomerDetailResponse;
-        setBillsMap((prev) => ({...prev, [expandedId]: data.bills || [] }));
+        if (!cancelled) setBillsMap((prev) => ({...prev, [expandedId]: data.bills || [] }));
       } catch {
         try {
-          const mod = await import("@/lib/offline-db");
-          const allSales = await mod.offlineDB.sales.toArray();
-          const related = allSales.filter((s) => {
-            const cust = customers.find((c) => c._id === expandedId);
-            return cust?.saleIds?.includes(s.localId);
+          const allSales = await offlineDB.sales.toArray();
+          const custName = customers.find((c) => c._id === expandedId)?.name.trim().toLowerCase();
+          const related = allSales.filter(
+            (s) => (s as unknown as { customerName?: string }).customerName?.trim().toLowerCase() === custName
+          );
+          const mapped: Bill[] = related.map((s) => {
+            const sale = s as unknown as {
+              localId: string;
+              productName: string;
+              quantity: number;
+              mainUnit: string;
+              sellUnit: string;
+              pattaPerBox?: number;
+              mlPerBottle?: number;
+              total: number;
+              createdAt: string;
+            };
+            return {
+              _id: sale.localId,
+              productName: sale.productName,
+              quantity: sale.quantity,
+              mainUnit: sale.mainUnit || "box",
+              sellUnit: sale.sellUnit || "patta",
+              pattaPerBox: sale.pattaPerBox || 10,
+              mlPerBottle: sale.mlPerBottle || 120,
+              total: Math.round(sale.total),
+              createdAt: sale.createdAt,
+            };
           });
-          const mapped: Bill[] = related.map((s) => ({
-            _id: s.localId,
-            productName: s.productName,
-            quantity: s.quantity,
-            quantityInTablets: s.quantityInTablets || s.totalTablets,
-            totalTablets: s.totalTablets || s.quantityInTablets,
-            unit: s.unit || "tablet",
-            tabletsPerPatta: s.tabletsPerPatta || 10,
-            pattaPerBox: s.pattaPerBox || 10,
-            total: Math.round(s.total),
-            createdAt: s.createdAt,
-          }));
-          setBillsMap((prev) => ({...prev, [expandedId]: mapped }));
+          if (!cancelled) setBillsMap((prev) => ({...prev, [expandedId]: mapped }));
         } catch {}
       } finally {
-        setBillsLoading(null);
+        if (!cancelled) setBillsLoading(null);
       }
     };
     void fetchBills();
-  }, [expandedId, billsMap, customers]);
+    return () => {
+      cancelled = true;
+    };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [expandedId]);
 
-  const reload = async () => {
+  const reload = useCallback(async () => {
     await fetchAndSet(search);
-  };
+  }, [fetchAndSet, search]);
 
   const handleWusool = async () => {
     if (!wusoolId ||!amount || wusoolLoading) return;
@@ -176,9 +210,14 @@ export default function CustomersPage() {
     }
   };
 
-  const totalUdhar = Math.round(customers.filter((c) =>!c.isPaid).reduce((s, c) => s + c.totalUdhar, 0));
-  const pendingCount = customers.filter((c) =>!c.isPaid).length;
-  const paidCount = customers.filter((c) => c.isPaid).length;
+  const { totalUdhar, pendingCount, paidCount } = useMemo(() => {
+    const pending = customers.filter((c) =>!c.isPaid);
+    return {
+      totalUdhar: Math.round(pending.reduce((s, c) => s + c.totalUdhar, 0)),
+      pendingCount: pending.length,
+      paidCount: customers.filter((c) => c.isPaid).length,
+    };
+  }, [customers]);
 
   return (
     <div className="p-2 sm:p-3 md:p-4 max-w-2xl mx-auto">
@@ -221,18 +260,16 @@ export default function CustomersPage() {
                       {billsCount > 1 && <span className="bg-blue-100 text-blue-700 text-[8px] px-2 py-0.5 rounded-full">{billsCount} bills</span>}
                       {c.isPaid && <span className="bg-green-600 text-white text-[8px] px-2 py-0.5 rounded-full">WUSOOL</span>}
                     </p>
-
                     <div className="text-[10px] text-gray-500 leading-3 mt-1 truncate">
                       {c.isPaid? (
                         <>
-                          <div>Udhar: {udharDate? new Date(udharDate).toLocaleDateString() : "-"} {new Date(udharDate || 0).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</div>
+                          <div>Udhar: {udharDate? new Date(udharDate).toLocaleDateString() : "-"} {udharDate? new Date(udharDate).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : ""}</div>
                           <div className="text-green-700 font-medium">Wusool: {wusoolDate? new Date(wusoolDate).toLocaleString() : "-"}</div>
                         </>
                       ) : (
                         <div>{udharDate? new Date(udharDate).toLocaleString() : ""} {c.village? `| ${c.village}` : ""} {c.phone? `| ${c.phone}` : ""}</div>
                       )}
                     </div>
-
                     {c.isPaid? (
                       <p className="text-[11px] mt-1"><span className="text-green-700 font-bold">Rs {c.paidAmount?.toLocaleString()}</span></p>
                     ) : (
@@ -243,7 +280,6 @@ export default function CustomersPage() {
                       </p>
                     )}
                   </div>
-
                   <div className="flex shrink-0 gap-1">
                     {c.isPaid? (
                       <button onClick={() => handleDelete(c._id)} disabled={isDeleting} className={`px-3 py-1.5 rounded-lg text-[11px] font-bold ${isDeleting? "bg-gray-100 text-gray-400" : "bg-gray-100 text-gray-600"}`}>{isDeleting? "..." : "Del"}</button>
@@ -265,8 +301,7 @@ export default function CustomersPage() {
                             <div className="flex-1 min-w-0">
                               <p className="font-bold leading-tight truncate">{b.productName}</p>
                               <p className="text-[10px] text-gray-600 leading-tight">
-                                {b.quantity} {b.unit} = {b.quantityInTablets || b.totalTablets || b.quantity} Tab
-                                {b.tabletsPerPatta? ` • ${b.tabletsPerPatta} Tab/Patta` : ""}
+                                {b.quantity} {b.sellUnit} {b.mainUnit!== b.sellUnit? `(${b.mainUnit})` : ""} • {b.pattaPerBox} per box
                               </p>
                               <p className="text-[9px] text-gray-400">{b.createdAt? new Date(b.createdAt).toLocaleString() : ""}</p>
                             </div>
@@ -282,7 +317,7 @@ export default function CustomersPage() {
                     {c.wusoolHistory && c.wusoolHistory.length > 0? (
                       <div className="space-y-1">
                         {c.wusoolHistory.slice().reverse().map((w, idx) => (
-                          <div key={idx} className="flex justify-between bg-gray-50 rounded-lg px-2 py-1.5 text-[11px]">
+                          <div key={`${w.date}-${idx}`} className="flex justify-between bg-gray-50 rounded-lg px-2 py-1.5 text-[11px]">
                             <span className="font-bold text-green-700">Rs {w.amount.toLocaleString()}</span>
                             <span className="text-[10px] text-gray-500">{new Date(w.date).toLocaleString()}</span>
                           </div>

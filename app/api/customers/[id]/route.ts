@@ -13,12 +13,11 @@ type RouteParams = { params: Promise<{ id: string }> };
 type SaleBill = {
   _id: Types.ObjectId;
   productName: string;
+  mainUnit: string;
+  sellUnit: string;
   quantity: number;
-  quantityInTablets?: number;
-  totalTablets?: number;
-  unit?: string;
-  tabletsPerPatta?: number;
   pattaPerBox?: number;
+  mlPerBottle?: number;
   total: number;
   createdAt?: Date;
 };
@@ -43,21 +42,22 @@ export async function GET(req: NextRequest, { params }: RouteParams) {
     }
 
     const saleIds = customer.saleIds || [];
-    const sales = (saleIds.length > 0
-      ? await Sale.find({ _id: { $in: saleIds } }).sort({ createdAt: 1 }).lean<SaleBill[]>()
-      : []) as SaleBill[];
+    const sales = (
+      saleIds.length > 0
+       ? await Sale.find({ _id: { $in: saleIds } }).sort({ createdAt: 1 }).lean()
+        : []
+    ) as unknown as SaleBill[];
 
     const bills = sales.map((s) => ({
-      _id: s._id,
+      _id: s._id.toString(),
       productName: s.productName,
       quantity: s.quantity,
-      quantityInTablets: s.quantityInTablets || s.totalTablets || s.quantity,
-      totalTablets: s.totalTablets || s.quantityInTablets || s.quantity,
-      unit: s.unit || "tablet",
-      tabletsPerPatta: s.tabletsPerPatta || 10,
+      mainUnit: s.mainUnit,
+      sellUnit: s.sellUnit,
       pattaPerBox: s.pattaPerBox || 10,
+      mlPerBottle: s.mlPerBottle || 120,
       total: Math.round(s.total || 0),
-      createdAt: s.createdAt,
+      createdAt: s.createdAt?.toISOString(),
     }));
 
     return NextResponse.json({
