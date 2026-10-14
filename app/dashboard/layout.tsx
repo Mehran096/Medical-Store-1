@@ -58,7 +58,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
     <div className="min-h-dvh flex bg-gray-50">
       <div className="md:hidden fixed top-0 left-0 right-0 bg-[#0f766e] text-white p-3.5 flex justify-between items-center z-30 h-14 pt-[env(safe-area-inset-top)]">
         <h2 className="font-bold text-[13px] flex items-center gap-2" suppressHydrationWarning>
-          <Image src="/logo.png" alt="logo" width={24} height={24} className="w-6 h-6 rounded-full bg-white border" />
+          <Image src="/logo.png" unoptimized alt="Yasir Medical" width={24} height={24} className="w-6 h-6 rounded-full bg-white border" />
           💊 Yasir Medical
           {hasMounted && isOffline && <span className="text-[9px] bg-amber-500 px-1.5 py-0.5 rounded-full">OFFLINE</span>}
           {hasMounted && pendingCount > 0 && <span className="text-[9px] bg-blue-500 px-1.5 py-0.5 rounded-full">{pendingCount}</span>}
@@ -70,7 +70,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
         <div className="md:hidden h-14 shrink-0" />
         <div className="mb-6">
           <div className="flex items-center gap-2.5 mb-2">
-            <Image src="/logo.png" alt="Yasir Medical" width={36} height={36} className="w-9 h-9 rounded-full bg-white border-2 border-white shadow-sm" />
+            <Image src="/logo.png" alt="Yasir Medical" width={36} height={36} unoptimized className="w-9 h-9 rounded-full bg-white border-2 border-white shadow-sm" />
             <div><h2 className="font-bold text-[14px] leading-tight">Yasir Medical Store</h2><p className="text-[10px] text-teal-200 -mt-0.5">Medicines • Patta • Box</p></div>
             {hasMounted && isOffline && <span className="text-[9px] bg-amber-500 px-1.5 py-0.5 rounded-full ml-1" suppressHydrationWarning>OFFLINE</span>}
           </div>

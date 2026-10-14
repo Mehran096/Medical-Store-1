@@ -10,7 +10,7 @@ type Product = {
   _id: string; name: string; company?: string; generic?: string; batchNo?: string; expiryDate?: string; rack?: string; barcode?: string;
   mainUnit: MainUnit;
   pattaPerBox: number; mlPerBottle: number;
-  buyPrice: number; sellPrice: number; // buy per Box, sell per Patta (if box) stored
+  buyPrice: number; sellPrice: number;
   stock: number;
   localId?: string; synced?: number;
 };
@@ -19,7 +19,7 @@ type FormState = {
   name: string; company: string; generic: string; batchNo: string; expiryDate: string; rack: string; barcode: string;
   mainUnit: MainUnit;
   pattaPerBox: string; mlPerBottle: string;
-  buyPrice: string; sellPrice: string; stock: string; // sellPrice UI = per Box if box
+  buyPrice: string; sellPrice: string; stock: string;
 };
 
 type Pagination = { page: number; totalPages: number; hasMore: boolean; totalCount: number };
@@ -37,6 +37,11 @@ function useIsOnline(): boolean {
   const getSnapshot = useCallback(() => window.navigator.onLine, []);
   const getServerSnapshot = useCallback(() => true, []);
   return useSyncExternalStore(subscribe, getSnapshot, getServerSnapshot);
+}
+function fmt1(n: number | string): string {
+  const v = Number(n);
+  if (!Number.isFinite(v)) return "0";
+  return v % 1 === 0? v.toFixed(0) : v.toFixed(1);
 }
 
 export default function ProductsPage() {
@@ -155,10 +160,9 @@ export default function ProductsPage() {
     const ppb = Number(form.pattaPerBox) || 10;
     if (sellInput <= 0 || buy <= 0) { alert("Buy & Sell price required"); return; }
 
-    // V14.2.1 FIX: if box, user enters Sell per Box, we store per Patta
     let sellToStore = sellInput;
     if (form.mainUnit === "box") {
-      sellToStore = sellInput / ppb; // 500 box -> 50 patta
+      sellToStore = sellInput / ppb;
     }
 
     const payload = {
@@ -226,7 +230,6 @@ export default function ProductsPage() {
     await refreshAfterAction(search);
   };
 
-  // V14.2.1 PROFIT LOGIC
   const ppbForm = Number(form.pattaPerBox) || 10;
   const buyForm = Number(form.buyPrice) || 0;
   const sellInputForm = Number(form.sellPrice) || 0;
@@ -282,18 +285,38 @@ export default function ProductsPage() {
         <div className="flex gap-2 mt-3"><button type="submit" className="bg-green-600 text-white px-6 py-2 rounded-lg text-[13px]">{editId? "Update" : "+ Add Box/Bottle"}</button>{editId && <button type="button" onClick={() => { setEditId(null); setForm({ name: "", company: "", generic: "", batchNo: "", expiryDate: "", rack: "", barcode: "", mainUnit: "box", pattaPerBox: "10", mlPerBottle: "120", buyPrice: "", sellPrice: "", stock: "10" }); }} className="bg-gray-100 px-6 py-2 rounded-lg text-[13px]">Cancel</button>}</div>
       </form>
       {loading? <p className="text-center py-10 text-[13px]">Loading...</p> : (
-        <><div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">{products.map((p) => (
+        <><div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">{products.map((p) => {
+          const totalBuy = p.stock * p.buyPrice;
+          const sellPerBox = p.mainUnit==="box"? p.sellPrice * p.pattaPerBox : p.sellPrice;
+          const totalSell = p.stock * sellPerBox;
+          const totalProfit = totalSell - totalBuy;
+          return (
           <div key={p._id} className="bg-white border p-3 rounded-xl shadow-sm">
             <div className="flex justify-between"><p className="font-semibold text-[13px]">{p.name}</p><span className="text-[10px] bg-gray-100 px-2 py-0.5 rounded-full">Stock: {p.mainUnit}</span></div>
             <p className="text-[11px] text-gray-500">{p.company} {p.rack? `• ${p.rack}` : ""}</p>
             <div className="grid grid-cols-3 gap-1 mt-2 text-[10px]">
-              <div className="bg-red-50 p-1.5 rounded text-center"><div>Buy/{p.mainUnit}</div><div className="font-bold">Rs.{p.buyPrice}</div></div>
-              <div className="bg-blue-50 p-1.5 rounded text-center"><div>Sell/{p.mainUnit==="box"?`Box (${(p.sellPrice*p.pattaPerBox).toFixed(0)}/Box)`:`${p.mainUnit}`}</div><div className="font-bold">Rs.{p.mainUnit==="box"? p.sellPrice.toFixed(1) : p.sellPrice}/Patta</div><div className="text-[9px]">Box: Rs.{(p.sellPrice*p.pattaPerBox).toFixed(0)}</div></div>
-              <div className="bg-green-50 p-1.5 rounded text-center"><div>Stock</div><div className="font-bold">{p.stock} {p.mainUnit}{p.mainUnit==="box"? ` (${p.stock*p.pattaPerBox} Patta)`:""}</div></div>
+              <div className="bg-red-50 p-1.5 rounded text-center">
+                <div className="text-gray-500 text-[9px]">Buy/{p.mainUnit}</div>
+                <div className="font-bold text-[11px]">Rs.{fmt1(p.buyPrice)}</div>
+                <div className="mt-1 pt-1 border-t border-red-200 font-bold text-orange-700">Total Buy<br/>Rs.{fmt1(totalBuy)}</div>
+                <div className="text-[9px] text-gray-500">{fmt1(p.stock)} {p.mainUnit}</div>
+              </div>
+              <div className="bg-blue-50 p-1.5 rounded text-center">
+                <div className="text-gray-500 text-[9px]">Sell/{p.mainUnit==="box"?`Box`:`${p.mainUnit}`}</div>
+                <div className="font-bold text-[11px]">Rs.{p.mainUnit==="box"? fmt1(p.sellPrice) : fmt1(p.sellPrice)}/Patta</div>
+                <div className="text-[9px]">Box: Rs.{fmt1(sellPerBox)}</div>
+                <div className="mt-1 pt-1 border-t border-blue-200 font-bold text-green-700">Total Sell<br/>Rs.{fmt1(totalSell)}</div>
+              </div>
+              <div className="bg-green-50 p-1.5 rounded text-center">
+                <div className="text-gray-500 text-[9px]">Stock</div>
+                <div className="font-bold text-[11px]">{fmt1(p.stock)} {p.mainUnit}</div>
+                <div className="text-[9px]">{p.mainUnit==="box"? `${fmt1(p.stock*p.pattaPerBox)} Patta` : `${p.mainUnit}`}</div>
+                <div className="mt-1 pt-1 border-t border-green-200 font-bold text-blue-700">Profit<br/>Rs.{fmt1(totalProfit)}</div>
+              </div>
             </div>
             <div className="flex gap-1.5 mt-2"><button onClick={() => handleEdit(p)} className="flex-1 bg-blue-50 text-blue-600 py-1.5 rounded-lg text-[11px]">Edit</button><button onClick={() => handleDelete(p._id)} className="flex-1 bg-red-50 text-red-600 py-1.5 rounded-lg text-[11px]">Del</button></div>
           </div>
-        ))}</div>{pagination.hasMore && <button onClick={() => setPage((pr) => pr + 1)} disabled={loadingMore} className="w-full mt-4 py-2.5 bg-white border rounded-xl text-[13px]">{loadingMore? "Loading..." : `More (${pagination.totalCount - products.length})`}</button>}</>
+        )})}</div>{pagination.hasMore && <button onClick={() => setPage((pr) => pr + 1)} disabled={loadingMore} className="w-full mt-4 py-2.5 bg-white border rounded-xl text-[13px]">{loadingMore? "Loading..." : `More (${pagination.totalCount - products.length})`}</button>}</>
       )}
     </div>
   );

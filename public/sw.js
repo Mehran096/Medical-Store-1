@@ -1,4 +1,4 @@
-const CACHE = 'medicine-v1'; // changed from al-farooq-v6
+const CACHE = 'medicine-v3'; // changed from al-farooq-v6
 
 const PRECACHE = [
   '/offline',

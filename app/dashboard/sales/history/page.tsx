@@ -134,7 +134,7 @@ export default function SalesHistoryPage() {
       <div className="flex flex-col gap-3 mb-4">
         <Link href="/dashboard" className="text-[11px] text-gray-500">← Back</Link>
         <div className="flex flex-col sm:flex-row justify-between gap-2">
-          <div><div className="flex items-center gap-2"><Image src="/logo.png" alt="logo" width={32} height={32} className="w-8 h-8 rounded-full border" /><h1 className="text-[17px] font-bold">💊 Sales History V14</h1></div><p className="text-[11px] text-gray-500 mt-1">{filter.toUpperCase()} • {pagination.totalCount+pendingCount} sales • Rs.{total.toFixed(0)} • +{profit.toFixed(0)}</p></div>
+          <div><div className="flex items-center gap-2"><Image src="/logo.png" unoptimized alt="logo" width={32} height={32} className="w-8 h-8 rounded-full border" /><h1 className="text-[17px] font-bold">💊 Sales History V14</h1></div><p className="text-[11px] text-gray-500 mt-1">{filter.toUpperCase()} • {pagination.totalCount+pendingCount} sales • Rs.{total.toFixed(0)} • +{profit.toFixed(0)}</p></div>
           <div className="flex gap-2"><button onClick={exportCSV} className="bg-white border px-3 py-2 rounded-lg text-[11px]">📥 CSV</button><Link href="/dashboard/sales" className="bg-green-700 text-white px-4 py-2 rounded-lg text-[11px]">+ New Sale</Link></div>
         </div>
       </div>

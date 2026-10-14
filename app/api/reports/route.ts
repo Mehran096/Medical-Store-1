@@ -9,23 +9,21 @@ import { Types } from "mongoose";
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
-type AggResult = { count: number; total: number; profit: number; buy: number; cash: number; credit: number; pending: number };
-type CustomerAgg = { totalUdhar: number; count: number };
+type AggResult = { count: number; total: number; profit: number; buy: number; cash: number; credit: number };
 
 function empty(): AggResult {
-  return { count: 0, total: 0, profit: 0, buy: 0, cash: 0, credit: 0, pending: 0 };
+  return { count: 0, total: 0, profit: 0, buy: 0, cash: 0, credit: 0 };
 }
 
 function fmt(arr: AggResult[]): AggResult {
-  if (!arr || arr.length === 0) return empty();
+  if (!arr?.[0]) return empty();
   return {
     count: arr[0].count || 0,
     total: arr[0].total || 0,
     profit: arr[0].profit || 0,
-    buy: arr[0].buy || 0,
+    buy: Math.round((arr[0].total - arr[0].profit) * 100) / 100,
     cash: arr[0].cash || 0,
     credit: arr[0].credit || 0,
-    pending: arr[0].pending || 0,
   };
 }
 
@@ -34,22 +32,25 @@ export async function GET() {
     const session = await getServerSession(authOptions);
     if (!session?.user?.id) {
       return NextResponse.json({
-        today: empty(),
-        month: empty(),
-        year: empty(),
-        all: empty(),
-        khata: { totalUdhar: 0, customers: 0, paid: 0 },
+        today: empty(), month: empty(), year: empty(), all: empty(),
+        khata: { totalUdhar: 0, customers: 0, paid: 0, totalWusool: 0 },
       });
     }
 
     await dbConnect();
     const userId = new Types.ObjectId(session.user.id);
 
+    // Peshawar time
     const now = new Date();
-    const startToday = new Date(now);
-    startToday.setHours(0, 0, 0, 0);
-    const startMonth = new Date(now.getFullYear(), now.getMonth(), 1);
-    const startYear = new Date(now.getFullYear(), 0, 1);
+    const pkOffset = 5 * 60;
+    const localNow = new Date(now.getTime() + (pkOffset + now.getTimezoneOffset()) * 60000);
+
+    const startToday = new Date(localNow); startToday.setHours(0,0,0,0);
+    const startTodayUTC = new Date(startToday.getTime() - pkOffset * 60000);
+    const startMonth = new Date(localNow.getFullYear(), localNow.getMonth(), 1);
+    const startMonthUTC = new Date(startMonth.getTime() - pkOffset * 60000);
+    const startYear = new Date(localNow.getFullYear(), 0, 1);
+    const startYearUTC = new Date(startYear.getTime() - pkOffset * 60000);
 
     const agg = (match: Record<string, unknown>) =>
       Sale.aggregate<AggResult>([
@@ -60,31 +61,26 @@ export async function GET() {
             count: { $sum: 1 },
             total: { $sum: "$total" },
             profit: { $sum: { $ifNull: ["$profit", 0] } },
-            buy: { $sum: { $subtract: ["$total", { $ifNull: ["$profit", 0] }] } },
-            cash: { $sum: { $cond: [{ $ne: ["$status", "pending"] }, "$total", 0] } },
-            credit: { $sum: { $cond: [{ $eq: ["$status", "pending"] }, "$total", 0] } },
-            pending: { $sum: { $ifNull: ["$pendingAmount", 0] } },
+            cash: { $sum: { $cond: [{ $in: ["$paymentType", ["cash","jazzcash","easypaisa","card"]] }, "$total", 0] } },
+            credit: { $sum: { $cond: [{ $in: ["$paymentType", ["credit","udhar"]] }, "$total", 0] } },
           },
         },
       ]);
 
     const [todayAgg, monthAgg, yearAgg, allAgg, khataAgg, paidAgg] = await Promise.all([
-      agg({ userId, createdAt: { $gte: startToday } }),
-      agg({ userId, createdAt: { $gte: startMonth } }),
-      agg({ userId, createdAt: { $gte: startYear } }),
+      agg({ userId, createdAt: { $gte: startTodayUTC } }),
+      agg({ userId, createdAt: { $gte: startMonthUTC } }),
+      agg({ userId, createdAt: { $gte: startYearUTC } }),
       agg({ userId }),
-      Customer.aggregate<CustomerAgg>([
+      Customer.aggregate([
         { $match: { userId, isPaid: false, totalUdhar: { $gt: 0.5 } } },
         { $group: { _id: null, totalUdhar: { $sum: "$totalUdhar" }, count: { $sum: 1 } } },
       ]),
-      Customer.aggregate<CustomerAgg>([
+      Customer.aggregate([
         { $match: { userId, isPaid: true } },
         { $group: { _id: null, totalUdhar: { $sum: "$paidAmount" }, count: { $sum: 1 } } },
       ]),
     ]);
-
-    const khataData = khataAgg[0] as CustomerAgg | undefined;
-    const paidData = paidAgg[0] as CustomerAgg | undefined;
 
     return NextResponse.json({
       today: fmt(todayAgg),
@@ -92,20 +88,17 @@ export async function GET() {
       year: fmt(yearAgg),
       all: fmt(allAgg),
       khata: {
-        totalUdhar: khataData?.totalUdhar || 0,
-        customers: khataData?.count || 0,
-        paid: paidData?.count || 0,
-        totalWusool: paidData?.totalUdhar || 0,
+        totalUdhar: khataAgg[0]?.totalUdhar || 0,
+        customers: khataAgg[0]?.count || 0,
+        paid: paidAgg[0]?.count || 0,
+        totalWusool: paidAgg[0]?.totalUdhar || 0,
       },
     });
   } catch (e) {
     console.error("GET /api/reports error:", e);
     return NextResponse.json({
-      today: empty(),
-      month: empty(),
-      year: empty(),
-      all: empty(),
-      khata: { totalUdhar: 0, customers: 0, paid: 0 },
+      today: empty(), month: empty(), year: empty(), all: empty(),
+      khata: { totalUdhar: 0, customers: 0, paid: 0, totalWusool: 0 },
     });
   }
 }
