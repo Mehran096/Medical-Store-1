@@ -13,7 +13,12 @@ type Sale = {
   total: number; profit: number; createdAt: string; localId?: string; synced?: number; customerName?: string; status?: string;
 };
 type ReportItem = { count: number; total: number; profit: number; buy: number };
-type Reports = { today: ReportItem; month: ReportItem; year: ReportItem; all: ReportItem; khata: { totalUdhar: number; customers: number; paid: number; totalWusool: number } };
+type PurchaseItem = { total: number; count: number };
+type Reports = {
+  today: ReportItem; month: ReportItem; year: ReportItem; all: ReportItem;
+  todayPurchase: PurchaseItem; monthPurchase: PurchaseItem; yearPurchase: PurchaseItem; allPurchase: PurchaseItem;
+  khata: { totalUdhar: number; customers: number; paid: number; totalWusool: number }
+};
 type ProductsResponse = Product[] | { products: Product[] };
 type CustomerLite = { totalUdhar: number; isPaid?: boolean };
 
@@ -36,6 +41,7 @@ function fixProduct(p: Product): Product {
   };
 }
 function emptyReport(): ReportItem { return { count: 0, total: 0, profit: 0, buy: 0 }; }
+function emptyPurchase(): PurchaseItem { return { total: 0, count: 0 }; }
 function safeReport(r: unknown): ReportItem {
   if (!r || typeof r!== "object") return emptyReport();
   const o = r as Partial<ReportItem>;
@@ -43,6 +49,11 @@ function safeReport(r: unknown): ReportItem {
   const profit = typeof o.profit === "number"? o.profit : 0;
   const buy = typeof o.buy === "number"? o.buy : total - profit;
   return { count: typeof o.count === "number"? o.count : 0, total, profit, buy: buy < 0? 0 : buy };
+}
+function safePurchase(r: unknown): PurchaseItem {
+  if (!r || typeof r!== "object") return emptyPurchase();
+  const o = r as Partial<PurchaseItem>;
+  return { total: typeof o.total === "number"? o.total : 0, count: typeof o.count === "number"? o.count : 0 };
 }
 function safeNum(n: unknown, fb = 0): number {
   const v = Number(n);
@@ -58,11 +69,60 @@ function useIsOnline(): boolean {
   return useSyncExternalStore(subscribe, getSnapshot, getServerSnapshot);
 }
 
+function BarChart({ reports }: { reports: Reports }) {
+  const data = [
+    { label: "Today", sale: reports.today.total, purchase: reports.todayPurchase.total },
+    { label: "Month", sale: reports.month.total, purchase: reports.monthPurchase.total },
+    { label: "Year", sale: reports.year.total, purchase: reports.yearPurchase.total },
+  ];
+  const max = Math.max(1,...data.flatMap(d => [d.sale, d.purchase]));
+  return (
+    <div className="bg-white p-4 rounded-xl border mb-5">
+      <div className="flex justify-between items-center mb-3">
+        <h3 className="font-bold text-[13px]">📊 Sales vs Purchase Chart</h3>
+        <div className="flex gap-2 text-[9px]">
+          <span className="flex items-center gap-1"><span className="w-2 h-2 bg-green-600 rounded-full inline-block"></span> Sale</span>
+          <span className="flex items-center gap-1"><span className="w-2 h-2 bg-blue-500 rounded-full inline-block"></span> Purchase</span>
+        </div>
+      </div>
+      <div className="flex items-end justify-around h-32 gap-2">
+        {data.map(d => {
+          const saleH = Math.max(6, Math.round((d.sale / max) * 90));
+          const purH = Math.max(6, Math.round((d.purchase / max) * 90));
+          return (
+            <div key={d.label} className="flex-1 flex flex-col items-center gap-1">
+              <div className="flex gap-1 items-end h-24">
+                <div className="w-7 sm:w-10 rounded-t-lg bg-green-600 flex items-end justify-center" style={{ height: `${saleH}%` }}>
+                  <span className="text-[8px] text-white font-bold mb-1">{d.sale>0? fmtMoney(d.sale):""}</span>
+                </div>
+                <div className="w-7 sm:w-10 rounded-t-lg bg-blue-500 flex items-end justify-center" style={{ height: `${purH}%` }}>
+                  <span className="text-[8px] text-white font-bold mb-1">{d.purchase>0? fmtMoney(d.purchase):""}</span>
+                </div>
+              </div>
+              <p className="text-[11px] font-bold">{d.label}</p>
+              <p className="text-[9px] text-gray-400">S:{fmtMoney(d.sale)} P:{fmtMoney(d.purchase)}</p>
+            </div>
+          );
+        })}
+      </div>
+      <div className="mt-3 grid grid-cols-3 gap-2 text-[10px]">
+        <div className="bg-green-50 p-2 rounded-lg text-center"><p className="text-gray-400">Month Net</p><p className={`font-bold ${reports.month.total-reports.monthPurchase.total>=0?"text-green-700":"text-red-600"}`}>Rs.{fmtMoney(reports.month.total-reports.monthPurchase.total)}</p></div>
+        <div className="bg-blue-50 p-2 rounded-lg text-center"><p className="text-gray-400">Year Net</p><p className={`font-bold ${reports.year.total-reports.yearPurchase.total>=0?"text-green-700":"text-red-600"}`}>Rs.{fmtMoney(reports.year.total-reports.yearPurchase.total)}</p></div>
+        <div className="bg-gray-50 p-2 rounded-lg text-center"><p className="text-gray-400">Profit % Month</p><p className="font-bold text-blue-700">{reports.month.total>0? Math.round((reports.month.profit/reports.month.total)*100):0}%</p></div>
+      </div>
+    </div>
+  );
+}
+
 export default function MainDashboard() {
   const isOnline = useIsOnline(); const isOffline =!isOnline;
   const [products, setProducts] = useState<Product[]>([]);
   const [recentSales, setRecentSales] = useState<Sale[]>([]);
-  const [reports, setReports] = useState<Reports>({ today: emptyReport(), month: emptyReport(), year: emptyReport(), all: emptyReport(), khata: { totalUdhar: 0, customers: 0, paid: 0, totalWusool: 0 } });
+  const [reports, setReports] = useState<Reports>({
+    today: emptyReport(), month: emptyReport(), year: emptyReport(), all: emptyReport(),
+    todayPurchase: emptyPurchase(), monthPurchase: emptyPurchase(), yearPurchase: emptyPurchase(), allPurchase: emptyPurchase(),
+    khata: { totalUdhar: 0, customers: 0, paid: 0, totalWusool: 0 }
+  });
   const [loading, setLoading] = useState(true); const [pendingCount, setPendingCount] = useState(0);
   const [totalUdhar, setTotalUdhar] = useState(0); const [udharCustomers, setUdharCustomers] = useState(0); const [paidCount, setPaidCount] = useState(0);
   const [yearLoss, setYearLoss] = useState(0);
@@ -85,7 +145,11 @@ export default function MainDashboard() {
             const total = arr.reduce((a,b)=>a+b.total,0); const profit = arr.reduce((a,b)=>a+(b.profit||0),0);
             return { count: arr.length, total, profit, buy: total - profit };
           };
-          setReports({ today: toReport(today), month: toReport(cachedSales), year: toReport(cachedSales), all: toReport(cachedSales), khata: { totalUdhar: 0, customers: 0, paid: 0, totalWusool: 0 } });
+          setReports({
+            today: toReport(today), month: toReport(cachedSales), year: toReport(cachedSales), all: toReport(cachedSales),
+            todayPurchase: emptyPurchase(), monthPurchase: emptyPurchase(), yearPurchase: emptyPurchase(), allPurchase: emptyPurchase(),
+            khata: { totalUdhar: 0, customers: 0, paid: 0, totalWusool: 0 }
+          });
           setTotalUdhar(cachedCustomers.filter(c=>!c.isPaid).reduce((a,b)=>a+b.totalUdhar,0));
           setUdharCustomers(cachedCustomers.filter(c=>!c.isPaid).length);
           setPaidCount(cachedCustomers.filter(c=>c.isPaid).length);
@@ -110,6 +174,10 @@ export default function MainDashboard() {
           month: safeReport(reportData?.month),
           year: safeReport(reportData?.year),
           all: safeReport(reportData?.all),
+          todayPurchase: safePurchase(reportData?.todayPurchase),
+          monthPurchase: safePurchase(reportData?.monthPurchase),
+          yearPurchase: safePurchase(reportData?.yearPurchase),
+          allPurchase: safePurchase(reportData?.allPurchase),
           khata: reportData?.khata || { totalUdhar: 0, customers: 0, paid: 0, totalWusool: 0 }
         });
         try {
@@ -159,15 +227,25 @@ export default function MainDashboard() {
 
       <div className="grid grid-cols-2 lg:grid-cols-3 gap-2.5 mb-3">
         <div className="bg-white p-3 sm:p-5 rounded-xl border"><p className="text-gray-400 text-[10px]">Today Sale</p><p className="text-[16px] font-bold mt-1">Rs. {fmtMoney(reports.today.total)}</p><p className="text-[10px] text-gray-500 mt-1">Buy Rs.{fmtMoney(reports.today.buy)} • <span className="text-green-700 font-bold">+Rs.{fmtMoney(reports.today.profit)}</span></p><p className="text-[10px] text-gray-400 mt-1">{reports.today.count} sales</p></div>
-        <div className="bg-white p-3 sm:p-5 rounded-xl border"><p className="text-gray-400 text-[10px]">This Month</p><p className="text-[16px] font-bold mt-1">Rs. {fmtMoney(reports.month.total)}</p><p className="text-[10px] text-gray-500 mt-1">Buy Rs.{fmtMoney(reports.month.buy)} • <span className="text-blue-600 font-bold">+Rs.{fmtMoney(reports.month.profit)}</span></p><p className="text-[10px] text-gray-400 mt-1">{reports.month.count} sales</p></div>
-        <div className="bg-white p-3 sm:p-5 rounded-xl border"><p className="text-gray-400 text-[10px]">This Year</p><p className="text-[16px] font-bold mt-1">Rs. {fmtMoney(reports.year.total)}</p><p className="text-[10px] text-gray-500 mt-1">Buy Rs.{fmtMoney(reports.year.buy)} • <span className="text-green-700 font-bold">+Rs.{fmtMoney(reports.year.profit)}</span></p><p className="text-[10px] text-gray-400 mt-1">{reports.year.count} sales • Loss Rs.{fmtMoney(yearLoss)}</p></div>
+        <div className="bg-blue-50 border-blue-200 p-3 sm:p-5 rounded-xl border"><p className="text-blue-600 text-[10px] font-bold">Today Purchase — Kharidari</p><p className="text-[16px] font-bold mt-1 text-blue-700">Rs. {fmtMoney(reports.todayPurchase.total)}</p><p className="text-[10px] text-gray-500 mt-1">{reports.todayPurchase.count} bills • Stock In</p><Link href="/dashboard/purchases/history" className="text-[10px] text-blue-700 mt-1 inline-block font-bold">History →</Link></div>
+        <div className="bg-white p-3 sm:p-5 rounded-xl border"><p className="text-gray-400 text-[10px]">This Month Sale</p><p className="text-[16px] font-bold mt-1">Rs. {fmtMoney(reports.month.total)}</p><p className="text-[10px] text-gray-500 mt-1">Buy Rs.{fmtMoney(reports.month.buy)} • <span className="text-blue-600 font-bold">+Rs.{fmtMoney(reports.month.profit)}</span></p><p className="text-[10px] text-gray-400 mt-1">{reports.month.count} sales</p></div>
+        <div className="bg-blue-50 border-blue-200 p-3 sm:p-5 rounded-xl border"><p className="text-blue-600 text-[10px] font-bold">This Month Purchase</p><p className="text-[16px] font-bold mt-1 text-blue-700">Rs. {fmtMoney(reports.monthPurchase.total)}</p><p className="text-[10px] text-gray-500 mt-1">{reports.monthPurchase.count} bills • Kharidari</p><p className="text-[10px] text-gray-600 mt-1">Net: Rs.{fmtMoney(reports.month.total - reports.monthPurchase.total)}</p></div>
+        <div className="bg-white p-3 sm:p-5 rounded-xl border"><p className="text-gray-400 text-[10px]">This Year Sale</p><p className="text-[16px] font-bold mt-1">Rs. {fmtMoney(reports.year.total)}</p><p className="text-[10px] text-gray-500 mt-1">Buy Rs.{fmtMoney(reports.year.buy)} • <span className="text-green-700 font-bold">+Rs.{fmtMoney(reports.year.profit)}</span></p><p className="text-[10px] text-gray-400 mt-1">{reports.year.count} sales • Loss Rs.{fmtMoney(yearLoss)}</p></div>
+        <div className="bg-blue-50 border-blue-200 p-3 sm:p-5 rounded-xl border"><p className="text-blue-600 text-[10px] font-bold">This Year Purchase</p><p className="text-[16px] font-bold mt-1 text-blue-700">Rs. {fmtMoney(reports.yearPurchase.total)}</p><p className="text-[10px] text-gray-500 mt-1">{reports.yearPurchase.count} bills</p><p className="text-[10px] text-gray-600 mt-1">Net Yearly: Rs.{fmtMoney(reports.year.total - reports.yearPurchase.total)}</p></div>
       </div>
+
+      <BarChart reports={reports} />
 
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-2.5 mb-5">
         <div className="bg-red-50 border-red-200 p-3 sm:p-5 rounded-xl border"><p className="text-red-500 text-[10px] font-bold">Total Udhar - Khata</p><p className="text-[16px] font-bold mt-1 text-red-600">Rs. {totalUdhar.toLocaleString()}</p><p className="text-[10px] text-gray-500 mt-1">{udharCustomers} pending {paidCount? `| ${paidCount} done` : ""}</p><Link href="/dashboard/customers" className="text-[10px] text-red-700 mt-2 inline-block font-bold">Wusool →</Link></div>
         <div className="bg-white p-3 sm:p-5 rounded-xl border"><p className="text-gray-400 text-[10px]">Stock Value (Sell)</p><p className="text-[16px] font-bold mt-1">Rs. {fmtMoney(stockValue)}</p><p className="text-[10px] text-gray-500 mt-1">Buy Rs.{fmtMoney(stockBuyValue)} • <span className="text-green-700 font-bold">+Rs.{fmtMoney(stockProfitPotential)}</span></p><p className="text-[9px] text-gray-400 mt-1">{products.length} medicines • {fmt1(products.reduce((a,p)=>a+p.stock,0))} Tabs</p></div>
         <div className="bg-green-50 border-green-200 p-3 sm:p-5 rounded-xl border"><p className="text-green-700 text-[10px] font-bold">Yearly Profit</p><p className="text-[16px] font-bold mt-1 text-green-700">Rs. {fmtMoney(reports.year.profit)}</p><p className="text-[10px] text-gray-500 mt-1">Gross Rs.{fmtMoney(reports.year.total)}</p><p className="text-[9px] text-gray-400 mt-1">{reports.year.count} bills in {new Date().getFullYear()}</p></div>
         <div className={`p-3 sm:p-5 rounded-xl border ${yearLoss>0? "bg-orange-50 border-orange-200" : "bg-white"}`}><p className={`text-[10px] font-bold ${yearLoss>0? "text-orange-600" : "text-gray-400"}`}>Yearly Loss</p><p className={`text-[16px] font-bold mt-1 ${yearLoss>0? "text-red-600" : "text-green-600"}`}>Rs. {fmtMoney(yearLoss)}</p><p className="text-[10px] text-gray-500 mt-1">{yearLoss>0? "Discount bills" : "No loss 👍"}</p></div>
+      </div>
+
+      <div className="flex gap-2 mb-5">
+        <Link href="/dashboard/purchases" className="flex-1 bg-blue-600 text-white p-3 rounded-xl text-center font-bold text-[12px]">📦 Add Purchase Bill</Link>
+        <Link href="/dashboard/purchases/history" className="flex-1 bg-white border p-3 rounded-xl text-center font-bold text-[12px]">📊 Purchase History</Link>
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">

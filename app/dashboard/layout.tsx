@@ -2,6 +2,7 @@
 import Link from "next/link";
 import Image from "next/image";
 import { useState, useCallback, useEffect, useSyncExternalStore } from "react";
+import { usePathname } from "next/navigation";
 import { offlineDB } from "@/lib/offline-db";
 
 function useIsOnline(): boolean {
@@ -23,11 +24,24 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   const [pendingCount, setPendingCount] = useState(0);
   const [hasMounted, setHasMounted] = useState(false);
   const isOnline = useIsOnline();
+  const pathname = usePathname();
 
-  useEffect(() => {
+  // FIX: Exact match for purchases, otherwise both will be dark
+  const isActive = useCallback((href: string) => {
+    if (href === "/dashboard") return pathname === "/dashboard";
+    if (href === "/dashboard/purchases") return pathname === "/dashboard/purchases";
+    if (href === "/dashboard/purchases/history") return pathname === "/dashboard/purchases/history";
+    return pathname === href;
+  }, [pathname]);
+
+  const linkClass = (href: string) =>
+    `p-2.5 rounded-lg transition text-[13px]
+     ${isActive(href)? "bg-teal-900 text-white font-bold" : "hover:bg-teal-700 text-white/80"}`;
+
+  useEffect(() => { 
     // eslint-disable-next-line react-hooks/set-state-in-effect
-    setHasMounted(true);
-  }, []);
+    setHasMounted(true); }, []);
+    
   useEffect(() => {
     if (!hasMounted) return;
     let mounted = true;
@@ -35,7 +49,12 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
       try {
         const salesPending = await offlineDB.sales.where("synced").equals(0).count();
         const productsPending = await offlineDB.products.where("synced").equals(0).count();
-        if (mounted) setPendingCount(salesPending + productsPending);
+        let purchasesPending = 0;
+        try {
+          const tbl = (offlineDB as unknown as { purchases?: { where: (f: string) => { equals: (v: number) => { count: () => Promise<number> } } } }).purchases;
+          if (tbl) purchasesPending = await tbl.where("synced").equals(0).count();
+        } catch {}
+        if (mounted) setPendingCount(salesPending + productsPending + purchasesPending);
       } catch {}
     };
     void updateCount();
@@ -72,7 +91,6 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
           <div className="flex items-center gap-2.5 mb-2">
             <Image src="/logo.png" alt="Yasir Medical" width={36} height={36} unoptimized className="w-9 h-9 rounded-full bg-white border-2 border-white shadow-sm" />
             <div><h2 className="font-bold text-[14px] leading-tight">Yasir Medical Store</h2><p className="text-[10px] text-teal-200 -mt-0.5">Medicines • Patta • Box</p></div>
-            {hasMounted && isOffline && <span className="text-[9px] bg-amber-500 px-1.5 py-0.5 rounded-full ml-1" suppressHydrationWarning>OFFLINE</span>}
           </div>
           <p className="text-[10px] text-teal-100/70 pl-1">Yasir Medical • Offline Ready</p>
         </div>
@@ -84,11 +102,17 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
         )}
 
         <nav className="flex flex-col gap-1 flex-1">
-          <Link href="/dashboard" onClick={closeMenu} className="hover:bg-teal-700 p-2.5 rounded-lg transition text-[13px]">📊 Dashboard</Link>
-          <Link href="/dashboard/products" onClick={closeMenu} className="hover:bg-teal-700 p-2.5 rounded-lg transition text-[13px]">💊 Medicines Stock</Link>
-          <Link href="/dashboard/sales" onClick={closeMenu} className="hover:bg-teal-700 p-2.5 rounded-lg transition text-[13px]">💰 Sale - Patta/Box</Link>
-          <Link href="/dashboard/customers" onClick={closeMenu} className="hover:bg-teal-700 p-2.5 rounded-lg transition text-[13px]">📒 Khata / Udhar</Link>
-          <Link href="/dashboard/sales/history" onClick={closeMenu} className="hover:bg-teal-700 p-2.5 rounded-lg transition text-[13px]">📜 Sales History</Link>
+          <Link href="/dashboard" onClick={closeMenu} className={linkClass("/dashboard")}>📊 Dashboard</Link>
+          <Link href="/dashboard/products" onClick={closeMenu} className={linkClass("/dashboard/products")}>💊 Medicines Stock</Link>
+          <Link href="/dashboard/sales" onClick={closeMenu} className={linkClass("/dashboard/sales")}>💰 Sale - Patta/Box</Link>
+
+          <div className="mt-3 mb-1 text-[10px] text-teal-200/60 font-bold tracking-widest pl-2">KHARIDARI</div>
+          <Link href="/dashboard/purchases" onClick={closeMenu} className={linkClass("/dashboard/purchases")}>📦 Add Purchase</Link>
+          <Link href="/dashboard/purchases/history" onClick={closeMenu} className={linkClass("/dashboard/purchases/history")}>📊 Purchase History</Link>
+
+          <div className="mt-3 mb-1 text-[10px] text-teal-200/60 font-bold tracking-widest pl-2">KHATA</div>
+          <Link href="/dashboard/customers" onClick={closeMenu} className={linkClass("/dashboard/customers")}>📒 Khata / Udhar</Link>
+          <Link href="/dashboard/sales/history" onClick={closeMenu} className={linkClass("/dashboard/sales/history")}>📜 Sales History</Link>
         </nav>
 
         <div className="mt-auto flex flex-col gap-2 pt-6" suppressHydrationWarning>
