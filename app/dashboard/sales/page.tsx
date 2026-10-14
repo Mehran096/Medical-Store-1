@@ -289,7 +289,7 @@ useEffect(() => {
       <div className="sticky top-0 z-30 bg-white border-b px-2 py-2">
         <div className="max-w-7xl mx-auto flex flex-col gap-1.5">
           <div className="flex justify-between items-center">
-            <h1 className="text-[12px] font-bold">💊 Yasir Medical V14.6 {isOffline?"📶 Offline":""}</h1>
+            <h1 className="text-[12px] font-bold">💊 V14 {isOffline?"📶 Offline":""}</h1>
             <div className="flex gap-1.5 items-center">
               <div className="relative">
                 <button onClick={()=>setShowExpiry(!showExpiry)} className="relative p-1.5 bg-gray-100 rounded-full hover:bg-gray-200">
