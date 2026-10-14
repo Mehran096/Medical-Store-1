@@ -259,7 +259,13 @@ export default function ProductsPage() {
           <input placeholder="Generic" value={form.generic} onChange={(e) => setForm({...form, generic: e.target.value })} className="border p-2.5 rounded-lg text-[13px]" />
           <input placeholder="Batch No" value={form.batchNo} onChange={(e) => setForm({...form, batchNo: e.target.value })} className="border p-2.5 rounded-lg text-[13px]" />
           <input placeholder="Barcode" value={form.barcode} onChange={(e) => setForm({...form, barcode: e.target.value })} className="border p-2.5 rounded-lg text-[13px]" />
-          <input type="date" value={form.expiryDate} onChange={(e) => setForm({...form, expiryDate: e.target.value })} className="border p-2.5 rounded-lg text-[13px]" />
+          <input
+  type="date"
+  value={form.expiryDate || ""}
+  onChange={(e) => setForm({...form, expiryDate: e.target.value })}
+  className="w-full border p-2.5 rounded-xl bg-white text-black text-[13px] min-h-11 block appearance-auto outline-none focus:ring-2 focus:ring-teal-600"
+  style={{ colorScheme: "light" }}
+/>
           <input placeholder="Rack" value={form.rack} onChange={(e) => setForm({...form, rack: e.target.value })} className="border p-2.5 rounded-lg text-[13px]" />
           <select value={form.mainUnit} onChange={(e) => setForm({...form, mainUnit: e.target.value as MainUnit })} className="border p-2.5 rounded-lg bg-white text-[13px] col-span-2">
             <option value="box">Stock Main: Box (10 Patta) - Enter Buy/Sell per Box</option>
