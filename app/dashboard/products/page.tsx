@@ -58,7 +58,7 @@ export default function ProductsPage() {
   const [pagination, setPagination] = useState<Pagination>({ page: 1, totalPages: 1, hasMore: false, totalCount: 0 });
   const [loading, setLoading] = useState(true); const [loadingMore, setLoadingMore] = useState(false);
   const [pendingCount, setPendingCount] = useState(0); const [syncing, setSyncing] = useState(false);
-
+const [dateFocused, setDateFocused] = useState(false);
   const refreshAfterAction = useCallback(async (currentSearch: string) => {
     setPage(1);
     if (typeof window!== "undefined" &&!window.navigator.onLine) {
@@ -259,13 +259,18 @@ export default function ProductsPage() {
           <input placeholder="Generic" value={form.generic} onChange={(e) => setForm({...form, generic: e.target.value })} className="border p-2.5 rounded-lg text-[13px]" />
           <input placeholder="Batch No" value={form.batchNo} onChange={(e) => setForm({...form, batchNo: e.target.value })} className="border p-2.5 rounded-lg text-[13px]" />
           <input placeholder="Barcode" value={form.barcode} onChange={(e) => setForm({...form, barcode: e.target.value })} className="border p-2.5 rounded-lg text-[13px]" />
-          <input
-  type="date"
-  value={form.expiryDate || ""}
-  onChange={(e) => setForm({...form, expiryDate: e.target.value })}
-  className="w-full border p-2.5 rounded-xl bg-white text-black text-[13px] min-h-11 block appearance-auto outline-none focus:ring-2 focus:ring-teal-600"
-  style={{ colorScheme: "light" }}
-/>
+          <div className="relative w-full">
+  <input
+    type={dateFocused || form.expiryDate? "date" : "text"}
+    value={form.expiryDate || ""}
+    placeholder="Expiry Date"
+    onFocus={() => setDateFocused(true)}
+    onBlur={() => setDateFocused(false)}
+    onChange={(e) => setForm({...form, expiryDate: e.target.value })}
+    className="w-full border p-2.5 rounded-xl bg-white text-black text-[13px] min-h-11 block appearance-auto outline-none focus:ring-2 focus:ring-teal-600 placeholder:text-gray-400"
+    style={{ colorScheme: "light" }}
+  />
+</div>
           <input placeholder="Rack" value={form.rack} onChange={(e) => setForm({...form, rack: e.target.value })} className="border p-2.5 rounded-lg text-[13px]" />
           <select value={form.mainUnit} onChange={(e) => setForm({...form, mainUnit: e.target.value as MainUnit })} className="border p-2.5 rounded-lg bg-white text-[13px] col-span-2">
             <option value="box">Stock Main: Box (10 Patta) - Enter Buy/Sell per Box</option>
