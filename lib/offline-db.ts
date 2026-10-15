@@ -9,28 +9,53 @@ export type WusoolSyncPayload = { amount: number; note?: string; date: string; }
 export interface OfflineProduct {
   _id?: string; localId: string; name: string; company: string; generic: string;
   batchNo: string; expiryDate?: string; barcode?: string; rack?: string;
-  mainUnit: MainUnit; // ONLY stock unit
+  mainUnit: MainUnit;
   pattaPerBox: number;
   mlPerBottle: number;
-  buyPrice: number; // per BOX/BOTTLE/TUBE/PIECE
-  sellPrice: number; // per PATTA (if box) else per Bottle/Tube/Piece - default
-  stock: number; // in mainUnit
+  buyPrice: number;
+  sellPrice: number;
+  stock: number;
   stockDisplay?: string;
   userId: string; synced: number; createdAt?: string; lastSyncedAt?: string;
 }
 
 export interface OfflineSale {
   localId: string; productId: string; productName: string;
-  mainUnit: MainUnit; sellUnit: SellUnit; // decided at counter
-  quantity: number; // in sellUnit
+  mainUnit: MainUnit; sellUnit: SellUnit;
+  quantity: number;
   pattaPerBox: number; mlPerBottle: number;
-  buyPriceMain: number; sellPrice: number; // EDITABLE
+  buyPriceMain: number; sellPrice: number;
   total: number; profit: number;
   deductionMain: number; deductionPatta: number;
   userId: string; createdAt: string; synced: number;
   customerName?: string; normalizedCustomerName?: string;
   paymentType?: string; status?: "paid" | "pending" | "partial"; isCredit?: boolean;
   customerId?: string; saleId?: string;
+}
+
+export interface OfflinePurchaseItem {
+  productId?: string;
+  name: string;
+  company?: string;
+  quantity: number;
+  mainUnit: MainUnit;
+  buyPricePerUnit: number;
+  sellPricePerUnit: number;
+  totalBuy?: number;
+}
+
+export interface OfflinePurchase {
+  localId: string;
+  _id?: string;
+  supplier: string;
+  invoiceNo?: string;
+  totalBuyAmount: number;
+  totalItems: number;
+  items: OfflinePurchaseItem[];
+  paymentType: "cash" | "credit";
+  userId: string;
+  createdAt: string;
+  synced: number;
 }
 
 export interface OfflineCustomer {
@@ -41,20 +66,30 @@ export interface OfflineCustomer {
   isPaid?: boolean; paidAmount?: number; wusoolHistory?: WusoolHistoryEntry[];
 }
 
-export type OfflinePayload = OfflineSale | OfflineProduct | OfflineCustomer | WusoolSyncPayload;
+export type OfflinePayload = OfflineSale | OfflineProduct | OfflineCustomer | WusoolSyncPayload | OfflinePurchase;
 
 export interface SyncQueueItem {
-  id?: number; type: 'sale' | 'product' | 'customer' | 'wusool';
+  id?: number; type: 'sale' | 'product' | 'customer' | 'wusool' | 'purchase';
   localId: string; payload: OfflinePayload; createdAt: Date; attempts: number;
 }
 
 export class OfflineDB extends Dexie {
   products!: Table<OfflineProduct, string>;
   sales!: Table<OfflineSale, string>;
+  purchases!: Table<OfflinePurchase, string>;
   customers!: Table<OfflineCustomer, string>;
   syncQueue!: Table<SyncQueueItem, number>;
+
   constructor() {
-    super('YasirMedicalOfflineV14');
+    super('YasirMedicalOfflineV15');
+    this.version(15).stores({
+      products: 'localId, _id, userId, synced, name, mainUnit',
+      sales: 'localId, productId, userId, synced, createdAt, customerName, status',
+      purchases: 'localId, _id, userId, synced, createdAt, supplier',
+      customers: 'localId, _id, name, normalizedName, totalUdhar, synced',
+      syncQueue: '++id, type, localId, createdAt'
+    });
+    // keep old versions for migration
     this.version(14).stores({
       products: 'localId, _id, userId, synced, name, mainUnit',
       sales: 'localId, productId, userId, synced, createdAt, customerName, status',
@@ -77,6 +112,38 @@ export function calcDeduction(main: MainUnit, sell: SellUnit, qty: number, ppb: 
     return { main: qty / mlB, patta: 0 };
   }
   return { main: qty, patta: 0 };
+}
+
+export async function addOfflinePurchase(
+  items: OfflinePurchaseItem[],
+  supplier: string,
+  invoiceNo: string,
+  userId: string,
+  paymentType: "cash" | "credit" = "cash"
+): Promise<string> {
+  const totalBuyAmount = items.reduce((sum, it) => sum + it.quantity * it.buyPricePerUnit, 0);
+  const localId = `pur_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+  const purchase: OfflinePurchase = {
+    localId,
+    supplier,
+    invoiceNo,
+    totalBuyAmount,
+    totalItems: items.length,
+    items: items.map(it => ({ ...it, totalBuy: it.quantity * it.buyPricePerUnit })),
+    paymentType,
+    userId,
+    createdAt: new Date().toISOString(),
+    synced: 0,
+  };
+  await offlineDB.purchases.add(purchase);
+  await offlineDB.syncQueue.add({
+    type: 'purchase',
+    localId,
+    payload: purchase,
+    createdAt: new Date(),
+    attempts: 0,
+  });
+  return localId;
 }
 
 export async function upsertOfflineCustomer(sale: OfflineSale, village = "", phone = ""): Promise<string | null> {

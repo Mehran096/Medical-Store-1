@@ -10,28 +10,28 @@ import { Types } from "mongoose";
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
-type SaleAgg = {
-  count: number;
-  total: number;
-  profit: number;
-  cash: number;
-  credit: number;
+type SaleAgg = { count: number; total: number; profit: number; cash: number; credit: number; };
+type PurchaseAgg = { total: number; count: number; };
+type KhataAgg = { totalUdhar: number; count: number; };
+
+type SaleMatch = {
+  userId: Types.ObjectId;
+  createdAt?: { $gte: Date; $lt: Date };
 };
 
-type PurchaseAgg = {
-  total: number;
-  count: number;
+type PurchaseMatch = {
+  userId: Types.ObjectId;
+  createdAt?: { $gte: Date; $lt: Date };
 };
 
-function emptySale(): SaleAgg & { buy: number } {
+function emptySale() {
   return { count: 0, total: 0, profit: 0, buy: 0, cash: 0, credit: 0 };
 }
-
 function emptyPurchase(): PurchaseAgg {
   return { total: 0, count: 0 };
 }
 
-function fmtSale(arr: SaleAgg[]): SaleAgg & { buy: number } {
+function fmtSale(arr: SaleAgg[]) {
   if (!arr?.[0]) return emptySale();
   const r = arr[0];
   return {
@@ -46,10 +46,27 @@ function fmtSale(arr: SaleAgg[]): SaleAgg & { buy: number } {
 
 function fmtPurchase(arr: PurchaseAgg[]): PurchaseAgg {
   if (!arr?.[0]) return emptyPurchase();
-  return {
-    total: arr[0].total || 0,
-    count: arr[0].count || 0,
-  };
+  return { total: arr[0].total || 0, count: arr[0].count || 0 };
+}
+
+const PKT_OFFSET_MS = 5 * 60 * 60 * 1000;
+
+function getPKTRange() {
+  const now = new Date();
+  const nowPKT = new Date(now.getTime() + PKT_OFFSET_MS);
+
+  const y = nowPKT.getUTCFullYear();
+  const m = nowPKT.getUTCMonth();
+  const d = nowPKT.getUTCDate();
+
+  // PKT midnight = UTC midnight of same Y/M/D minus 5h
+  // Example: 15/10/2026 00:00 PKT = 14/10/2026 19:00 UTC
+  const startTodayUTC = new Date(Date.UTC(y, m, d, 0, 0, 0, 0) - PKT_OFFSET_MS);
+  const startTomorrowUTC = new Date(Date.UTC(y, m, d + 1, 0, 0, 0, 0) - PKT_OFFSET_MS);
+  const startMonthUTC = new Date(Date.UTC(y, m, 1, 0, 0, 0, 0) - PKT_OFFSET_MS);
+  const startYearUTC = new Date(Date.UTC(y, 0, 1, 0, 0, 0, 0) - PKT_OFFSET_MS);
+
+  return { startTodayUTC, startTomorrowUTC, startMonthUTC, startYearUTC };
 }
 
 export async function GET() {
@@ -71,23 +88,9 @@ export async function GET() {
 
     await dbConnect();
     const userId = new Types.ObjectId(session.user.id);
+    const { startTodayUTC, startTomorrowUTC, startMonthUTC, startYearUTC } = getPKTRange();
 
-    // Peshawar PKT UTC+5
-    const now = new Date();
-    const pkOffset = 5 * 60;
-    const localNow = new Date(now.getTime() + (pkOffset + now.getTimezoneOffset()) * 60000);
-
-    const startToday = new Date(localNow);
-    startToday.setHours(0, 0, 0, 0);
-    const startTodayUTC = new Date(startToday.getTime() - pkOffset * 60000);
-
-    const startMonth = new Date(localNow.getFullYear(), localNow.getMonth(), 1);
-    const startMonthUTC = new Date(startMonth.getTime() - pkOffset * 60000);
-
-    const startYear = new Date(localNow.getFullYear(), 0, 1);
-    const startYearUTC = new Date(startYear.getTime() - pkOffset * 60000);
-
-    const saleAgg = (match: { userId: Types.ObjectId; createdAt?: { $gte: Date } }) =>
+    const saleAgg = (match: SaleMatch) =>
       Sale.aggregate<SaleAgg>([
         { $match: match },
         {
@@ -108,7 +111,7 @@ export async function GET() {
         },
       ]);
 
-    const purchaseAgg = (match: { userId: Types.ObjectId; createdAt?: { $gte: Date } }) =>
+    const purchaseAgg = (match: PurchaseMatch) =>
       Purchase.aggregate<PurchaseAgg>([
         { $match: match },
         {
@@ -132,19 +135,19 @@ export async function GET() {
       khataAgg,
       paidAgg,
     ] = await Promise.all([
-      saleAgg({ userId, createdAt: { $gte: startTodayUTC } }),
-      saleAgg({ userId, createdAt: { $gte: startMonthUTC } }),
-      saleAgg({ userId, createdAt: { $gte: startYearUTC } }),
+      saleAgg({ userId, createdAt: { $gte: startTodayUTC, $lt: startTomorrowUTC } }),
+      saleAgg({ userId, createdAt: { $gte: startMonthUTC, $lt: startTomorrowUTC } }),
+      saleAgg({ userId, createdAt: { $gte: startYearUTC, $lt: startTomorrowUTC } }),
       saleAgg({ userId }),
-      purchaseAgg({ userId, createdAt: { $gte: startTodayUTC } }),
-      purchaseAgg({ userId, createdAt: { $gte: startMonthUTC } }),
-      purchaseAgg({ userId, createdAt: { $gte: startYearUTC } }),
+      purchaseAgg({ userId, createdAt: { $gte: startTodayUTC, $lt: startTomorrowUTC } }),
+      purchaseAgg({ userId, createdAt: { $gte: startMonthUTC, $lt: startTomorrowUTC } }),
+      purchaseAgg({ userId, createdAt: { $gte: startYearUTC, $lt: startTomorrowUTC } }),
       purchaseAgg({ userId }),
-      Customer.aggregate([
+      Customer.aggregate<KhataAgg>([
         { $match: { userId, isPaid: false, totalUdhar: { $gt: 0.5 } } },
         { $group: { _id: null, totalUdhar: { $sum: "$totalUdhar" }, count: { $sum: 1 } } },
       ]),
-      Customer.aggregate([
+      Customer.aggregate<KhataAgg>([
         { $match: { userId, isPaid: true } },
         { $group: { _id: null, totalUdhar: { $sum: "$paidAmount" }, count: { $sum: 1 } } },
       ]),
@@ -160,10 +163,10 @@ export async function GET() {
       yearPurchase: fmtPurchase(yearPur),
       allPurchase: fmtPurchase(allPur),
       khata: {
-        totalUdhar: (khataAgg[0] as { totalUdhar: number } | undefined)?.totalUdhar || 0,
-        customers: (khataAgg[0] as { count: number } | undefined)?.count || 0,
-        paid: (paidAgg[0] as { count: number } | undefined)?.count || 0,
-        totalWusool: (paidAgg[0] as { totalUdhar: number } | undefined)?.totalUdhar || 0,
+        totalUdhar: khataAgg[0]?.totalUdhar || 0,
+        customers: khataAgg[0]?.count || 0,
+        paid: paidAgg[0]?.count || 0,
+        totalWusool: paidAgg[0]?.totalUdhar || 0,
       },
     });
   } catch (err) {

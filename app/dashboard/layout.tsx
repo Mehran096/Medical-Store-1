@@ -104,7 +104,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
         <nav className="flex flex-col gap-1 flex-1">
           <Link href="/dashboard" onClick={closeMenu} className={linkClass("/dashboard")}>📊 Dashboard</Link>
           <Link href="/dashboard/products" onClick={closeMenu} className={linkClass("/dashboard/products")}>💊 Medicines Stock</Link>
-          <Link href="/dashboard/sales" onClick={closeMenu} className={linkClass("/dashboard/sales")}>💰 Sale - Patta/Box</Link>
+          <Link href="/dashboard/sales" onClick={closeMenu} className={linkClass("/dashboard/sales")}>💰 Sales Point</Link>
 
           <div className="mt-3 mb-1 text-[10px] text-teal-200/60 font-bold tracking-widest pl-2">KHARIDARI</div>
           <Link href="/dashboard/purchases" onClick={closeMenu} className={linkClass("/dashboard/purchases")}>📦 Add Purchase</Link>

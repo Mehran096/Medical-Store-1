@@ -4,7 +4,7 @@ import Link from "next/link";
 export default function OfflinePage() {
   return (
     <div className="min-h-dvh flex flex-col items-center justify-center bg-[#f0fdfa] p-6 text-center">
-      <Image src="/logo.png" alt="Yasir Medical" width={80} height={80} className="w-20 h-20 rounded-full border-2 border-teal-600 mb-4 bg-white" />
+      <Image src="/logo.png" unoptimized alt="Yasir Medical" width={80} height={80} className="w-20 h-20 rounded-full border-2 border-teal-600 mb-4 bg-white" />
       <h1 className="text-xl font-bold">💊 Yasir Medical Store</h1>
       <p className="text-teal-700 text-sm font-medium">Medicines • Patta • Box • Offline Ready</p>
       <p className="text-gray-500 text-[12px] mt-3">You are offline. Your data is safe.</p>

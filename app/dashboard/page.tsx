@@ -12,6 +12,7 @@ type Sale = {
   productName: string; quantity: number; quantityInTablets?: number; totalTablets?: number; unit?: string;
   total: number; profit: number; createdAt: string; localId?: string; synced?: number; customerName?: string; status?: string;
 };
+type PurchaseLite = { totalBuyAmount: number; createdAt: string; };
 type ReportItem = { count: number; total: number; profit: number; buy: number };
 type PurchaseItem = { total: number; count: number };
 type Reports = {
@@ -20,7 +21,20 @@ type Reports = {
   khata: { totalUdhar: number; customers: number; paid: number; totalWusool: number }
 };
 type ProductsResponse = Product[] | { products: Product[] };
-type CustomerLite = { totalUdhar: number; isPaid?: boolean };
+type CustomerLite = { totalUdhar: number; isPaid?: boolean; paidAmount?: number };
+
+const PKT_OFFSET_MS = 5 * 60 * 60 * 1000;
+
+function getPKTBounds() {
+  const now = new Date();
+  const nowPKT = new Date(now.getTime() + PKT_OFFSET_MS);
+  const y = nowPKT.getUTCFullYear();
+  const m = nowPKT.getUTCMonth();
+  const d = nowPKT.getUTCDate();
+  const pktTodayUTC = Date.UTC(y, m, d, 0, 0, 0, 0) - PKT_OFFSET_MS;
+  const pktTomorrowUTC = Date.UTC(y, m, d + 1, 0, 0, 0, 0) - PKT_OFFSET_MS;
+  return { pktTodayUTC, pktTomorrowUTC };
+}
 
 function fmt1(n: unknown): string {
   const v = Number(n);
@@ -133,21 +147,37 @@ export default function MainDashboard() {
       try {
         const cachedProducts = await offlineDB.products.toArray() as unknown as Product[];
         const cachedSales = await offlineDB.sales.where("synced").equals(0).reverse().toArray() as unknown as Sale[];
+        const cachedPurchases = await offlineDB.purchases.toArray() as unknown as PurchaseLite[];
         const cachedCustomers = await offlineDB.customers.toArray() as unknown as CustomerLite[];
+
         setPendingCount(cachedSales.length + cachedProducts.filter(p => p.synced === 0).length);
+
         const isNowOffline = typeof window!== "undefined" &&!window.navigator.onLine;
         if (isNowOffline) {
           setProducts(cachedProducts.map(c => fixProduct(c)));
           setRecentSales(cachedSales.slice(0,5));
-          const now = new Date(); const startToday = new Date(now); startToday.setHours(0,0,0,0);
-          const today = cachedSales.filter(s => new Date(s.createdAt) >= startToday);
-          const toReport = (arr: typeof cachedSales): ReportItem => {
+          const { pktTodayUTC, pktTomorrowUTC } = getPKTBounds();
+          const todaySales = cachedSales.filter(s => {
+            const t = new Date(s.createdAt).getTime();
+            return t >= pktTodayUTC && t < pktTomorrowUTC;
+          });
+          const todayPurchases = cachedPurchases.filter(p => {
+            const t = new Date(p.createdAt).getTime();
+            return t >= pktTodayUTC && t < pktTomorrowUTC;
+          });
+          const toReport = (arr: Sale[]): ReportItem => {
             const total = arr.reduce((a,b)=>a+b.total,0); const profit = arr.reduce((a,b)=>a+(b.profit||0),0);
             return { count: arr.length, total, profit, buy: total - profit };
           };
           setReports({
-            today: toReport(today), month: toReport(cachedSales), year: toReport(cachedSales), all: toReport(cachedSales),
-            todayPurchase: emptyPurchase(), monthPurchase: emptyPurchase(), yearPurchase: emptyPurchase(), allPurchase: emptyPurchase(),
+            today: toReport(todaySales),
+            month: toReport(cachedSales),
+            year: toReport(cachedSales),
+            all: toReport(cachedSales),
+            todayPurchase: { total: todayPurchases.reduce((a,b)=>a+(b.totalBuyAmount||0),0), count: todayPurchases.length },
+            monthPurchase: { total: cachedPurchases.reduce((a,b)=>a+(b.totalBuyAmount||0),0), count: cachedPurchases.length },
+            yearPurchase: { total: cachedPurchases.reduce((a,b)=>a+(b.totalBuyAmount||0),0), count: cachedPurchases.length },
+            allPurchase: { total: cachedPurchases.reduce((a,b)=>a+(b.totalBuyAmount||0),0), count: cachedPurchases.length },
             khata: { totalUdhar: 0, customers: 0, paid: 0, totalWusool: 0 }
           });
           setTotalUdhar(cachedCustomers.filter(c=>!c.isPaid).reduce((a,b)=>a+b.totalUdhar,0));
@@ -156,6 +186,7 @@ export default function MainDashboard() {
           setYearLoss(cachedSales.filter(s=> (s.profit||0) < 0).reduce((a,b)=> a + Math.abs(b.profit||0),0));
           setLoading(false); return;
         }
+
         const [prodRes, salesRes, reportRes, khataRes, yearSalesRes] = await Promise.all([
           fetch("/api/products?limit=100", { signal: controller.signal }),
           fetch("/api/sales?filter=today&limit=5", { signal: controller.signal }),
@@ -196,7 +227,9 @@ export default function MainDashboard() {
           const loss = (yData.sales || []).filter(s=> safeNum(s.profit) < 0).reduce((a,b)=> a + Math.abs(safeNum(b.profit)),0);
           setYearLoss(Math.round(loss));
         } catch { setYearLoss(0); }
-      } catch (err) { if ((err as Error).name!== "AbortError") console.error(err); } finally { setLoading(false); }
+      } catch (err) {
+        if ((err as Error).name!== "AbortError") console.error(err);
+      } finally { setLoading(false); }
     };
     void fetchStats(); return () => controller.abort();
   }, []);

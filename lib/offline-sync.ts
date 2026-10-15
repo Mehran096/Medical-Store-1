@@ -1,15 +1,16 @@
-import { offlineDB, OfflineSale, OfflineProduct, OfflineCustomer, upsertOfflineCustomer, WusoolHistoryEntry, MainUnit, SellUnit, calcDeduction } from './offline-db';
+import { offlineDB, upsertOfflineCustomer, calcDeduction } from './offline-db';
+import type { OfflineSale, MainUnit, SellUnit, WusoolHistoryEntry, WusoolSyncPayload } from './offline-db';
 
 export interface OfflineSaleData {
   productId: string;
   productName: string;
-  quantity: number; // in SellUnit
+  quantity: number;
   mainUnit: MainUnit;
-  sellUnit: SellUnit; // patta/half_patta/box/bottle/ml/tube/piece - decided at counter
+  sellUnit: SellUnit;
   pattaPerBox: number;
   mlPerBottle: number;
-  buyPriceMain: number; // per Box/Bottle/Tube/Piece
-  sellPrice: number; // per Patta/HalfPatta/Box/Bottle/ml - EDITABLE at counter
+  buyPriceMain: number;
+  sellPrice: number;
   userId: string;
   soldBy?: string;
   customerName?: string;
@@ -17,23 +18,6 @@ export interface OfflineSaleData {
   customerVillage?: string;
   paymentType?: string;
   customerId?: string;
-}
-
-export type WusoolSyncPayload = {
-  amount: number;
-  note?: string;
-  date: string;
-};
-
-export type OfflinePayload = OfflineSale | OfflineProduct | OfflineCustomer | WusoolSyncPayload;
-
-export interface SyncQueueItem {
-  id?: number;
-  type: 'sale' | 'product' | 'customer' | 'wusool';
-  localId: string;
-  payload: OfflinePayload;
-  createdAt: Date;
-  attempts: number;
 }
 
 type SyncManager = { register: (tag: string) => Promise<void> };
@@ -66,7 +50,7 @@ export async function saveSaleOffline(saleData: OfflineSaleData): Promise<string
     } else if (saleData.sellUnit === "half_patta") {
       total = saleData.sellPrice * saleData.quantity;
       profit = (saleData.sellPrice - buyPerPatta / 2) * saleData.quantity;
-    } else { // box
+    } else {
       total = saleData.sellPrice * saleData.quantity;
       profit = (saleData.sellPrice - saleData.buyPriceMain) * saleData.quantity;
     }
@@ -91,7 +75,7 @@ export async function saveSaleOffline(saleData: OfflineSaleData): Promise<string
     quantity: saleData.quantity,
     pattaPerBox: ppb, mlPerBottle: mlB,
     buyPriceMain: saleData.buyPriceMain, 
-    sellPrice: saleData.sellPrice, // EDITABLE price from counter
+    sellPrice: saleData.sellPrice,
     total: Math.round(total), 
     profit: Math.round(profit),
     deductionMain: ded.main, 
@@ -215,6 +199,73 @@ export async function syncOfflineSales(): Promise<{ synced: number; failed: numb
   return { synced, failed };
 }
 
+export async function syncOfflinePurchases(): Promise<{ synced: number; failed: number }> {
+  if (typeof window === 'undefined' || !navigator.onLine) return { synced: 0, failed: 0 };
+  const unsynced = await offlineDB.purchases.where('synced').equals(0).toArray();
+  let synced = 0; let failed = 0;
+  for (const pur of unsynced) {
+    try {
+      const res = await fetch('/api/purchases', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          supplier: pur.supplier,
+          invoiceNo: pur.invoiceNo,
+          totalBuyAmount: pur.totalBuyAmount,
+          items: pur.items,
+          paymentType: pur.paymentType,
+          localId: pur.localId,
+          createdAt: pur.createdAt,
+        }),
+      });
+      if (res.ok) {
+        await offlineDB.purchases.update(pur.localId, { synced: 1 });
+        synced++;
+      } else failed++;
+    } catch { failed++; }
+  }
+  try {
+    const queue = await offlineDB.syncQueue.where('type').equals('purchase').toArray();
+    for (const q of queue) {
+      if (q.id) await offlineDB.syncQueue.delete(q.id).catch(() => {});
+    }
+  } catch {}
+  return { synced, failed };
+}
+
+export async function syncOfflineWusool(): Promise<{ synced: number; failed: number }> {
+  if (typeof window === 'undefined' || !navigator.onLine) return { synced: 0, failed: 0 };
+  let synced = 0; let failed = 0;
+  try {
+    const wusoolQueue = await offlineDB.syncQueue.where('type').equals('wusool').toArray();
+    for (const q of wusoolQueue) {
+      try {
+        const p = q.payload as WusoolSyncPayload;
+        const cust = await offlineDB.customers.get(q.localId);
+        if (!cust) continue;
+        const res = await fetch('/api/khata/wusool', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ customerId: cust._id ?? cust.localId, customerName: cust.name, amount: p.amount, note: p.note }),
+        });
+        if (res.ok) {
+          if (q.id) await offlineDB.syncQueue.delete(q.id);
+          synced++;
+        } else failed++;
+      } catch { failed++; }
+    }
+  } catch {}
+  return { synced, failed };
+}
+
+export async function syncAllOffline(): Promise<{ sales: number; purchases: number; wusool: number }> {
+  const s = await syncOfflineSales();
+  const p = await syncOfflinePurchases();
+  const w = await syncOfflineWusool();
+  return { sales: s.synced, purchases: p.synced, wusool: w.synced };
+}
+
 if (typeof window !== 'undefined') {
-  window.addEventListener('online', () => { void syncOfflineSales(); });
+  window.addEventListener('online', () => { 
+    void syncAllOffline(); 
+  });
 }

@@ -1,5 +1,6 @@
 import dbConnect from "@/lib/mongodb";
 import Purchase from "@/models/Purchase";
+import Product from "@/models/Product";
 import { NextRequest, NextResponse } from "next/server";
 import { getServerSession } from "next-auth";
 import { authOptions } from "../../auth/[...nextauth]/route";
@@ -11,10 +12,24 @@ type RouteParams = {
   params: Promise<{ id: string }>;
 };
 
+type UpdateBody = {
+  supplier?: string;
+  invoiceNo?: string;
+  paymentType?: "cash" | "credit";
+};
+
+type UpdateSet = {
+  supplier?: string;
+  invoiceNo?: string;
+  paymentType?: "cash" | "credit";
+};
+
 function getCleanId(raw: string) {
   const trimmed = (raw || "").toString().trim();
-  const noUnderscore = trimmed.replace(/^_/, "");
-  const hexOnly = noUnderscore.replace(/[^a-fA-F0-9]/g, "");
+  // Direct valid ObjectId — no stripping that could match wrong doc
+  if (Types.ObjectId.isValid(trimmed)) return trimmed;
+  // Fallback: extract last 24 hex chars (old mobile bug)
+  const hexOnly = trimmed.replace(/[^a-fA-F0-9]/g, "");
   return hexOnly.length >= 24 ? hexOnly.slice(-24) : hexOnly;
 }
 
@@ -43,12 +58,6 @@ export async function GET(_req: NextRequest, { params }: RouteParams) {
   return NextResponse.json(purchase);
 }
 
-type UpdateBody = {
-  supplier?: string;
-  invoiceNo?: string;
-  paymentType?: "cash" | "credit";
-};
-
 export async function PUT(req: NextRequest, { params }: RouteParams) {
   const session = await getServerSession(authOptions);
   if (!session?.user?.id) {
@@ -65,7 +74,7 @@ export async function PUT(req: NextRequest, { params }: RouteParams) {
 
   const body = (await req.json()) as UpdateBody;
 
-  const setFields: Record<string, unknown> = {};
+  const setFields: UpdateSet = {};
   if (typeof body.supplier === "string") setFields.supplier = body.supplier;
   if (typeof body.invoiceNo === "string") setFields.invoiceNo = body.invoiceNo;
   if (body.paymentType) setFields.paymentType = body.paymentType;
@@ -100,13 +109,29 @@ export async function DELETE(_req: NextRequest, { params }: RouteParams) {
     return NextResponse.json({ error: "Invalid id: " + id }, { status: 400 });
   }
 
+  const userId = new Types.ObjectId(session.user.id);
+
   const deleted = await Purchase.findOneAndDelete({
     _id: cleanId,
-    userId: new Types.ObjectId(session.user.id),
+    userId,
   });
 
   if (!deleted) {
     return NextResponse.json({ error: "Not found" }, { status: 404 });
+  }
+
+  // Revert stock when purchase deleted - prevents stock value bug
+  try {
+    for (const item of deleted.items || []) {
+      if (item.productId) {
+        await Product.updateOne(
+          { _id: item.productId, userId },
+          { $inc: { stock: -Number(item.quantity) } }
+        );
+      }
+    }
+  } catch (err) {
+    console.error("Stock revert error on purchase delete:", err);
   }
 
   return NextResponse.json({ success: true });

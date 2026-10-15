@@ -8,9 +8,32 @@ import { Types } from "mongoose";
 
 export const dynamic = "force-dynamic";
 
-type DateFilter = {
-  createdAt?: { $gte: Date };
+type DateRange = {
+  $gte: Date;
+  $lt: Date;
 };
+
+type PurchaseQuery = {
+  userId: Types.ObjectId;
+  createdAt?: DateRange;
+};
+
+const PKT_OFFSET_MS = 5 * 60 * 60 * 1000;
+
+function getPKTRange() {
+  const now = new Date();
+  const nowPKT = new Date(now.getTime() + PKT_OFFSET_MS);
+  const y = nowPKT.getUTCFullYear();
+  const m = nowPKT.getUTCMonth();
+  const d = nowPKT.getUTCDate();
+
+  const startTodayUTC = new Date(Date.UTC(y, m, d, 0, 0, 0, 0) - PKT_OFFSET_MS);
+  const startTomorrowUTC = new Date(Date.UTC(y, m, d + 1, 0, 0, 0, 0) - PKT_OFFSET_MS);
+  const startMonthUTC = new Date(Date.UTC(y, m, 1, 0, 0, 0, 0) - PKT_OFFSET_MS);
+  const startYearUTC = new Date(Date.UTC(y, 0, 1, 0, 0, 0, 0) - PKT_OFFSET_MS);
+
+  return { startTodayUTC, startTomorrowUTC, startMonthUTC, startYearUTC };
+}
 
 export async function GET(req: NextRequest) {
   const session = await getServerSession(authOptions);
@@ -26,23 +49,20 @@ export async function GET(req: NextRequest) {
   const limit = Math.min(50, Math.max(1, parseInt(searchParams.get("limit") || "15", 10)));
   const skip = (page - 1) * limit;
 
-  let dateFilter: DateFilter = {};
-  const now = new Date();
+  const { startTodayUTC, startTomorrowUTC, startMonthUTC, startYearUTC } = getPKTRange();
+
+  let dateRange: DateRange | undefined;
   if (filter === "today") {
-    const s = new Date();
-    s.setHours(0, 0, 0, 0);
-    dateFilter = { createdAt: { $gte: s } };
+    dateRange = { $gte: startTodayUTC, $lt: startTomorrowUTC };
   } else if (filter === "monthly") {
-    const s = new Date(now.getFullYear(), now.getMonth(), 1);
-    dateFilter = { createdAt: { $gte: s } };
+    dateRange = { $gte: startMonthUTC, $lt: startTomorrowUTC };
   } else if (filter === "yearly") {
-    const s = new Date(now.getFullYear(), 0, 1);
-    dateFilter = { createdAt: { $gte: s } };
+    dateRange = { $gte: startYearUTC, $lt: startTomorrowUTC };
   }
 
-  const query = {
+  const query: PurchaseQuery = {
     userId,
-   ...dateFilter,
+  ...(dateRange? { createdAt: dateRange } : {}),
   };
 
   const [purchases, totalCount, agg] = await Promise.all([
@@ -84,6 +104,8 @@ type PurchaseBody = {
   paymentType?: "cash" | "credit";
   items: PurchaseItemInput[];
   totalBuyAmount?: number;
+  localId?: string;
+  createdAt?: string;
 };
 
 export async function POST(req: NextRequest) {
@@ -122,6 +144,7 @@ export async function POST(req: NextRequest) {
       totalBuy: Number(it.quantity) * Number(it.buyPricePerUnit),
     })),
     paymentType: body.paymentType || "cash",
+  ...(body.createdAt? { createdAt: new Date(body.createdAt) } : {}),
   });
 
   for (const it of body.items) {
@@ -132,7 +155,7 @@ export async function POST(req: NextRequest) {
           $inc: { stock: Number(it.quantity) },
           $set: {
             buyPrice: Number(it.buyPricePerUnit),
-           ...(it.sellPricePerUnit? { sellPrice: Number(it.sellPricePerUnit) } : {}),
+          ...(it.sellPricePerUnit? { sellPrice: Number(it.sellPricePerUnit) } : {}),
           },
         }
       );
