@@ -145,7 +145,7 @@ export default function PurchasesPage() {
           <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="🔍 Search medicine e.g. panadol" className="w-full border rounded-lg px-2 md:px-4 py-1 text-[11px] md:text-[15px] h-8 md:h-12 outline-none focus:border-green-600 focus:ring-1 focus:ring-green-600" />
           {loading && <p className="text-[10px] md:text-sm text-gray-400 mt-2">Searching...</p>}
           {products.length>0 && (
-            <div className="absolute left-2 right-2 md:left-4 md:right-4 top-11 md:top-[60px] bg-white border shadow-xl rounded-xl z-20 max-h-72 overflow-auto">
+            <div className="absolute left-2 right-2 md:left-4 md:right-4 top-11 md:top-15 bg-white border shadow-xl rounded-xl z-20 max-h-72 overflow-auto">
               {products.map(p=>(
                 <button key={p._id} onClick={()=>addToBill(p)} className="w-full text-left p-2 md:p-3 border-b hover:bg-green-50 flex justify-between items-center">
                   <span className="text-[11px] md:text-[14px] font-bold">{p.name} <span className="font-normal text-gray-400 text-[9px] md:text-xs ml-1">{p.company}</span></span>

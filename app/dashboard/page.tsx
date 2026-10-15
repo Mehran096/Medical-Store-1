@@ -22,6 +22,9 @@ type Reports = {
 };
 type ProductsResponse = Product[] | { products: Product[] };
 type CustomerLite = { totalUdhar: number; isPaid?: boolean; paidAmount?: number };
+type TopItem = { _id: string; totalQty: number; totalSale: number; totalProfit: number; count: number };
+type TopFilter = "today" | "monthly" | "yearly" | "all";
+type TopResponse = { top: TopItem[] };
 
 const PKT_OFFSET_MS = 5 * 60 * 60 * 1000;
 
@@ -128,6 +131,41 @@ function BarChart({ reports }: { reports: Reports }) {
   );
 }
 
+function TopSellingCard({ top, filter, setFilter }: { top: TopItem[]; filter: TopFilter; setFilter: (f: TopFilter) => void }) {
+  return (
+    <div className="bg-white p-4 rounded-xl border mb-5">
+      <div className="flex justify-between items-center mb-3">
+        <h3 className="font-bold text-[13px]">🔥 High Sell Products — {filter}</h3>
+        <Link href="/dashboard/sales/top" className="text-[10px] bg-blue-50 text-blue-600 px-2.5 py-1 rounded-full font-bold hover:bg-blue-100">View All →</Link>
+      </div>
+      <div className="flex gap-1 mb-3">
+        {(["today","monthly","yearly","all"] as const).map((f) => (
+          <button key={f} onClick={() => setFilter(f)} className={`px-2.5 py-1 rounded-full text-[10px] capitalize ${filter===f? "bg-green-600 text-white" : "bg-gray-100 text-gray-600"}`}>{f}</button>
+        ))}
+      </div>
+      {top.length===0? <p className="text-[11px] text-gray-400 py-4 text-center">No sales {filter}</p> : (
+        <div className="space-y-2">
+          {top.slice(0,6).map((p,i)=>(
+            <div key={p._id} className="flex justify-between items-center bg-gray-50 border rounded-lg p-2.5">
+              <div className="flex items-center gap-2">
+                <span className={`w-6 h-6 rounded-full flex items-center justify-center text-[10px] font-bold ${i===0?"bg-yellow-400":i===1?"bg-gray-300":i===2?"bg-orange-300":"bg-white border"}`}>{i+1}</span>
+                <div>
+                  <p className="font-bold text-[11px] truncate max-w-35">{p._id}</p>
+                  <p className="text-[9px] text-gray-500">{p.count} bills • {fmt1(p.totalQty)} qty</p>
+                </div>
+              </div>
+              <div className="text-right">
+                <p className="font-bold text-[11px] text-green-700">Rs.{fmtMoney(p.totalSale)}</p>
+                <p className="text-[9px] text-gray-500">+Rs.{fmtMoney(p.totalProfit)}</p>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function MainDashboard() {
   const isOnline = useIsOnline(); const isOffline =!isOnline;
   const [products, setProducts] = useState<Product[]>([]);
@@ -140,6 +178,8 @@ export default function MainDashboard() {
   const [loading, setLoading] = useState(true); const [pendingCount, setPendingCount] = useState(0);
   const [totalUdhar, setTotalUdhar] = useState(0); const [udharCustomers, setUdharCustomers] = useState(0); const [paidCount, setPaidCount] = useState(0);
   const [yearLoss, setYearLoss] = useState(0);
+  const [topFilter, setTopFilter] = useState<TopFilter>("monthly");
+  const [topProducts, setTopProducts] = useState<TopItem[]>([]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -184,15 +224,24 @@ export default function MainDashboard() {
           setUdharCustomers(cachedCustomers.filter(c=>!c.isPaid).length);
           setPaidCount(cachedCustomers.filter(c=>c.isPaid).length);
           setYearLoss(cachedSales.filter(s=> (s.profit||0) < 0).reduce((a,b)=> a + Math.abs(b.profit||0),0));
+          // offline top calc
+          const map = new Map<string, TopItem>();
+          cachedSales.forEach(s=>{
+            const ex = map.get(s.productName);
+            if(ex){ ex.totalQty+=s.quantity; ex.totalSale+=s.total; ex.totalProfit+=s.profit; ex.count+=1; }
+            else { map.set(s.productName, { _id: s.productName, totalQty: s.quantity, totalSale: s.total, totalProfit: s.profit, count: 1 }); }
+          });
+          setTopProducts(Array.from(map.values()).sort((a,b)=>b.totalQty-a.totalQty).slice(0,6));
           setLoading(false); return;
         }
 
-        const [prodRes, salesRes, reportRes, khataRes, yearSalesRes] = await Promise.all([
+        const [prodRes, salesRes, reportRes, khataRes, yearSalesRes, topRes] = await Promise.all([
           fetch("/api/products?limit=100", { signal: controller.signal }),
           fetch("/api/sales?filter=today&limit=5", { signal: controller.signal }),
           fetch("/api/reports", { signal: controller.signal }),
           fetch("/api/customers?search=", { signal: controller.signal }),
           fetch("/api/sales?filter=yearly&limit=500", { signal: controller.signal }),
+          fetch(`/api/sales/top?filter=${topFilter}`, { signal: controller.signal }),
         ]);
         const prodData = (await prodRes.json()) as ProductsResponse;
         const prodList = (Array.isArray(prodData)? prodData : prodData.products || []).map(fixProduct);
@@ -227,12 +276,16 @@ export default function MainDashboard() {
           const loss = (yData.sales || []).filter(s=> safeNum(s.profit) < 0).reduce((a,b)=> a + Math.abs(safeNum(b.profit)),0);
           setYearLoss(Math.round(loss));
         } catch { setYearLoss(0); }
+        try {
+          const topData = (await topRes.json()) as TopResponse;
+          setTopProducts(topData.top || []);
+        } catch { setTopProducts([]); }
       } catch (err) {
         if ((err as Error).name!== "AbortError") console.error(err);
       } finally { setLoading(false); }
     };
     void fetchStats(); return () => controller.abort();
-  }, []);
+  }, [topFilter]);
 
   const lowStock = products.filter(p => p.stock < 20);
   const lowStockWarning = products.filter(p => p.stock >= 20 && p.stock < 100);
@@ -268,6 +321,7 @@ export default function MainDashboard() {
       </div>
 
       <BarChart reports={reports} />
+      <TopSellingCard top={topProducts} filter={topFilter} setFilter={setTopFilter} />
 
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-2.5 mb-5">
         <div className="bg-red-50 border-red-200 p-3 sm:p-5 rounded-xl border"><p className="text-red-500 text-[10px] font-bold">Total Udhar - Khata</p><p className="text-[16px] font-bold mt-1 text-red-600">Rs. {totalUdhar.toLocaleString()}</p><p className="text-[10px] text-gray-500 mt-1">{udharCustomers} pending {paidCount? `| ${paidCount} done` : ""}</p><Link href="/dashboard/customers" className="text-[10px] text-red-700 mt-2 inline-block font-bold">Wusool →</Link></div>
