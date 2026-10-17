@@ -9,9 +9,11 @@ type Product = {
   name: string;
   company?: string;
   buyPrice: number;
-  sellPrice: number;
+  sellPrice: number; // in DB this is per Patta for box
   stock: number;
   mainUnit: "box" | "bottle" | "tube" | "piece";
+  pattaPerBox?: number;
+  mlPerBottle?: number;
 };
 
 type BillItem = {
@@ -19,9 +21,10 @@ type BillItem = {
   name: string;
   company?: string;
   quantity: number;
-  buyPricePerUnit: number;
-  sellPricePerUnit: number;
+  buyPricePerUnit: number; // always per BOX in UI for box
+  sellPricePerUnit: number; // always per BOX in UI for box
   mainUnit: Product["mainUnit"];
+  pattaPerBox: number; // keep for conversion when saving
 };
 
 export default function PurchasesPage() {
@@ -55,6 +58,8 @@ export default function PurchasesPage() {
             sellPrice: o.sellPrice,
             stock: o.stock,
             mainUnit: o.mainUnit,
+            pattaPerBox: o.pattaPerBox,
+            mlPerBottle: o.mlPerBottle,
           })) as Product[]);
         } else {
           const res = await fetch(`/api/products?search=${encodeURIComponent(search)}&page=1&limit=10`);
@@ -70,14 +75,26 @@ export default function PurchasesPage() {
 
   const addToBill = (p: Product) => {
     if (bill.find((b) => b.productId === p._id)) { setSearch(""); setProducts([]); return; }
-    setBill(prev => [...prev, { productId: p._id, name: p.name, company: p.company, quantity: 1, buyPricePerUnit: p.buyPrice, sellPricePerUnit: p.sellPrice, mainUnit: p.mainUnit }]);
+    const ppb = p.pattaPerBox || 10;
+    // FIX: Convert Patta sell to Box sell for display
+    const displaySell = p.mainUnit === "box" ? p.sellPrice * ppb : p.sellPrice;
+    setBill(prev => [...prev, { 
+      productId: p._id, 
+      name: p.name, 
+      company: p.company, 
+      quantity: 1, 
+      buyPricePerUnit: p.buyPrice, // already per box/bottle
+      sellPricePerUnit: displaySell, // now per box for box
+      mainUnit: p.mainUnit,
+      pattaPerBox: ppb
+    }]);
     setSearch(""); setProducts([]);
   };
 
   const addCustom = () => {
     if (!search.trim()) return;
     if (bill.find(b => b.name.toLowerCase() === search.trim().toLowerCase())) { setSearch(""); return; }
-    setBill(prev => [...prev, { name: search.trim(), company: "", quantity: 1, buyPricePerUnit: 0, sellPricePerUnit: 0, mainUnit: "box" }]);
+    setBill(prev => [...prev, { name: search.trim(), company: "", quantity: 1, buyPricePerUnit: 0, sellPricePerUnit: 0, mainUnit: "box", pattaPerBox: 10 }]);
     setSearch(""); setProducts([]);
   };
 
@@ -94,7 +111,20 @@ export default function PurchasesPage() {
     if (!bill.length) return alert("Add medicines first");
     const clean = bill.filter(b => b.quantity>0);
     if(!clean.length) return alert("Qty can't be 0");
-    const offlineItems: OfflinePurchaseItem[] = clean.map(c=>({
+
+    // FIX: Convert Box sell back to Patta sell before saving to DB/API
+    const itemsForApi = clean.map(c=>{
+      if(c.mainUnit === "box"){
+        return {
+          ...c,
+          // API/DB expects sellPrice per Patta
+          sellPricePerUnit: c.sellPricePerUnit / (c.pattaPerBox || 10),
+        };
+      }
+      return c;
+    });
+
+    const offlineItems: OfflinePurchaseItem[] = itemsForApi.map(c=>({
       productId: c.productId,
       name: c.name,
       company: c.company,
@@ -103,6 +133,7 @@ export default function PurchasesPage() {
       buyPricePerUnit: c.buyPricePerUnit,
       sellPricePerUnit: c.sellPricePerUnit,
     }));
+    
     const totalAmount = clean.reduce((s,it)=>s+it.quantity*it.buyPricePerUnit,0);
     setSaving(true);
     try {
@@ -114,7 +145,7 @@ export default function PurchasesPage() {
       }
       const res = await fetch("/api/purchases", {
         method: "POST", headers: {"Content-Type":"application/json"},
-        body: JSON.stringify({ supplier, invoiceNo, items: clean, totalBuyAmount: totalAmount, paymentType:"cash"})
+        body: JSON.stringify({ supplier, invoiceNo, items: itemsForApi, totalBuyAmount: totalAmount, paymentType:"cash"})
       });
       if(!res.ok) throw new Error(await res.text());
       void syncAllOffline();
@@ -146,12 +177,15 @@ export default function PurchasesPage() {
           {loading && <p className="text-[10px] md:text-sm text-gray-400 mt-2">Searching...</p>}
           {products.length>0 && (
             <div className="absolute left-2 right-2 md:left-4 md:right-4 top-11 md:top-15 bg-white border shadow-xl rounded-xl z-20 max-h-72 overflow-auto">
-              {products.map(p=>(
-                <button key={p._id} onClick={()=>addToBill(p)} className="w-full text-left p-2 md:p-3 border-b hover:bg-green-50 flex justify-between items-center">
-                  <span className="text-[11px] md:text-[14px] font-bold">{p.name} <span className="font-normal text-gray-400 text-[9px] md:text-xs ml-1">{p.company}</span></span>
-                  <span className="text-[8px] md:text-xs bg-gray-100 px-2 py-1 rounded-full">Stk {p.stock} • Rs.{p.buyPrice}</span>
-                </button>
-              ))}
+              {products.map(p=>{
+                const displaySell = p.mainUnit === "box" ? p.sellPrice * (p.pattaPerBox||10) : p.sellPrice;
+                return (
+                  <button key={p._id} onClick={()=>addToBill(p)} className="w-full text-left p-2 md:p-3 border-b hover:bg-green-50 flex justify-between items-center">
+                    <span className="text-[11px] md:text-[14px] font-bold">{p.name} <span className="font-normal text-gray-400 text-[9px] md:text-xs ml-1">{p.company}</span></span>
+                    <span className="text-[8px] md:text-xs bg-gray-100 px-2 py-1 rounded-full">Stk {p.stock} {p.mainUnit} • Buy Rs.{p.buyPrice} • Sell Rs.{displaySell} ({p.mainUnit})</span>
+                  </button>
+                );
+              })}
               <button onClick={addCustom} className="w-full p-2 md:p-3 text-[11px] md:text-sm text-blue-600 bg-blue-50 font-bold">+ Add as new: {search}</button>
             </div>
           )}
@@ -168,7 +202,7 @@ export default function PurchasesPage() {
             bill.map((it, idx)=>(
               <div key={idx} className="p-2 md:p-4 border-b hover:bg-gray-50/50">
                 <div className="flex justify-between items-center mb-1 md:mb-2">
-                  <p className="font-bold text-[11px] md:text-[15px] truncate pr-2">{it.name} {it.company? `(${it.company})`:""} {!it.productId && <span className="ml-1 text-[8px] md:text-[10px] bg-yellow-100 text-yellow-700 px-1.5 py-0.5 rounded">NEW</span>}</p>
+                  <p className="font-bold text-[11px] md:text-[15px] truncate pr-2">{it.name} {it.company? `(${it.company})`:""} {!it.productId && <span className="ml-1 text-[8px] md:text-[10px] bg-yellow-100 text-yellow-700 px-1.5 py-0.5 rounded">NEW</span>} <span className="text-[9px] font-normal text-gray-500">[{it.mainUnit} x {it.pattaPerBox} patta]</span></p>
                   <button onClick={()=>setBill(prev=>prev.filter((_,i)=>i!==idx))} className="text-[9px] md:text-xs bg-red-50 text-red-600 px-2 md:px-3 py-0.5 md:py-1 rounded-full hover:bg-red-100">Del</button>
                 </div>
                 <div className="grid grid-cols-4 md:grid-cols-[120px_1fr_1fr_110px] gap-1 md:gap-4 items-end">
@@ -177,14 +211,17 @@ export default function PurchasesPage() {
                     <input type="text" inputMode="numeric" value={it.quantity===0?"":it.quantity} placeholder="1" onFocus={e=>e.target.select()} onChange={e=>updateQty(idx,e.target.value)} className="w-full border rounded-lg px-2 md:px-3 py-1 text-[11px] md:text-[15px] h-7 md:h-11 text-center md:text-left outline-none focus:border-green-600" />
                   </div>
                   <div>
-                    <label className="text-[8px] md:text-[11px] text-blue-600 font-bold block mb-0.5">Buy Price</label>
+                    <label className="text-[8px] md:text-[11px] text-blue-600 font-bold block mb-0.5">Buy Price (per {it.mainUnit})</label>
                     <input type="text" inputMode="decimal" value={it.buyPricePerUnit===0?"":it.buyPricePerUnit} placeholder="0" onFocus={e=>e.target.select()} onChange={e=>updatePrice(idx,"buyPricePerUnit",e.target.value)} className="w-full border rounded-lg px-2 md:px-3 py-1 text-[11px] md:text-[15px] h-7 md:h-11 bg-blue-50/40 outline-none focus:border-blue-500" />
                   </div>
                   <div>
-                    <label className="text-[8px] md:text-[11px] text-gray-500 block mb-0.5">Sell Price</label>
-                    <input type="text" inputMode="decimal" value={it.sellPricePerUnit===0?"":it.sellPricePerUnit} placeholder="0" onFocus={e=>e.target.select()} onChange={e=>updatePrice(idx,"sellPricePerUnit",e.target.value)} className="w-full border rounded-lg px-2 md:px-3 py-1 text-[11px] md:text-[15px] h-7 md:h-11 outline-none focus:border-green-600" />
+                    <label className="text-[8px] md:text-[11px] text-green-600 font-bold block mb-0.5">Sell Price (per {it.mainUnit})</label>
+                    <input type="text" inputMode="decimal" value={it.sellPricePerUnit===0?"":it.sellPricePerUnit} placeholder="0" onFocus={e=>e.target.select()} onChange={e=>updatePrice(idx,"sellPricePerUnit",e.target.value)} className="w-full border rounded-lg px-2 md:px-3 py-1 text-[11px] md:text-[15px] h-7 md:h-11 bg-green-50/40 outline-none focus:border-green-600" />
                   </div>
-                  <div className="text-[10px] md:text-[14px] font-bold h-7 md:h-11 flex items-center justify-center bg-gray-100 md:bg-gray-50 rounded-lg">Rs.{it.quantity*it.buyPricePerUnit}</div>
+                  <div className="text-[10px] md:text-[14px] font-bold h-7 md:h-11 flex flex-col items-center justify-center bg-gray-100 md:bg-gray-50 rounded-lg leading-tight">
+                    <span>Rs.{it.quantity*it.buyPricePerUnit}</span>
+                    <span className="text-[8px] font-normal text-gray-500">{it.mainUnit==="box" ? `= Rs.${(it.sellPricePerUnit / it.pattaPerBox).toFixed(1)}/patta` : ""}</span>
+                  </div>
                 </div>
               </div>
             ))

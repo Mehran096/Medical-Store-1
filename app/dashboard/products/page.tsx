@@ -58,27 +58,48 @@ export default function ProductsPage() {
   const [pagination, setPagination] = useState<Pagination>({ page: 1, totalPages: 1, hasMore: false, totalCount: 0 });
   const [loading, setLoading] = useState(true); const [loadingMore, setLoadingMore] = useState(false);
   const [pendingCount, setPendingCount] = useState(0); const [syncing, setSyncing] = useState(false);
-const [dateFocused, setDateFocused] = useState(false);
+  const [dateFocused, setDateFocused] = useState(false);
+
   const refreshAfterAction = useCallback(async (currentSearch: string) => {
     setPage(1);
     if (typeof window!== "undefined" &&!window.navigator.onLine) {
       const cached = await offlineDB.products.toArray();
-      const filtered = cached.filter((c) =>!currentSearch || c.name.toLowerCase().includes(currentSearch.toLowerCase())).map((c) => ({
+      const searchLower = currentSearch.toLowerCase();
+      const filteredAll = cached.filter((c) =>!currentSearch || c.name.toLowerCase().includes(searchLower) || (c.company||"").toLowerCase().includes(searchLower));
+      const limit = 20;
+      const paged = filteredAll.slice(0, limit).map((c) => ({
         _id: c._id || c.localId, name: c.name, company: c.company, generic: c.generic, batchNo: c.batchNo, expiryDate: c.expiryDate, rack: c.rack, barcode: c.barcode,
         mainUnit: c.mainUnit as MainUnit,
         pattaPerBox: c.pattaPerBox, mlPerBottle: c.mlPerBottle,
         buyPrice: c.buyPrice, sellPrice: c.sellPrice, stock: c.stock,
         localId: c.localId, synced: c.synced,
       }));
-      setProducts(filtered); setPagination({ page: 1, totalPages: 1, hasMore: false, totalCount: filtered.length }); return;
+      setProducts(paged); 
+      setPagination({ page: 1, totalPages: Math.ceil(filteredAll.length/20)||1, hasMore: filteredAll.length > paged.length, totalCount: filteredAll.length }); 
+      return;
     }
     try {
       const res = await fetch(`/api/products?search=${encodeURIComponent(currentSearch)}&page=1&limit=20`);
       const data = (await res.json()) as ProductsResponse;
+      let list: Product[] = [];
       if (Array.isArray(data)) {
-        setProducts(data as Product[]);
+        list = data as Product[];
+        setProducts(list);
         setPagination({ page: 1, totalPages: 1, hasMore: false, totalCount: data.length });
-      } else { setProducts(data.products); setPagination(data.pagination); }
+      } else { 
+        list = data.products;
+        setProducts(data.products); 
+        setPagination(data.pagination); 
+      }
+      // CACHE for offline after action
+      if (list.length > 0) {
+        const offlineUser = getOfflineUser();
+        const userId = offlineUser?._id || "offline";
+        const toCache = list.map(p => ({
+          _id: p._id, localId: p._id, name: p.name, company: p.company||"", generic: p.generic||"", batchNo: p.batchNo||"", expiryDate: p.expiryDate, barcode: p.barcode||"", rack: p.rack||"", mainUnit: p.mainUnit, pattaPerBox: p.pattaPerBox, mlPerBottle: p.mlPerBottle, buyPrice: p.buyPrice, sellPrice: p.sellPrice, stock: p.stock, userId, synced: 1, createdAt: new Date().toISOString(),
+        } as OfflineProduct));
+        await offlineDB.products.bulkPut(toCache);
+      }
     } catch (err) { console.error(err); }
   }, []);
 
@@ -117,8 +138,10 @@ const [dateFocused, setDateFocused] = useState(false);
         const cached = await offlineDB.products.toArray();
         setPendingCount(cached.filter((c) => c.synced === 0).length);
         if (typeof window!== "undefined" &&!window.navigator.onLine) {
-          const filtered = cached.filter((c) =>!currentSearch || c.name.toLowerCase().includes(currentSearch.toLowerCase()));
-          const paged = filtered.slice(0, currentPage * 20).map((c) => ({
+          const searchLower = currentSearch.toLowerCase();
+          const filtered = cached.filter((c) =>!currentSearch || c.name.toLowerCase().includes(searchLower) || (c.company||"").toLowerCase().includes(searchLower));
+          const limit = currentPage * 20;
+          const paged = filtered.slice(0, limit).map((c) => ({
             _id: c._id || c.localId, name: c.name, company: c.company, generic: c.generic, batchNo: c.batchNo, expiryDate: c.expiryDate, rack: c.rack, barcode: c.barcode,
             mainUnit: c.mainUnit as MainUnit,
             pattaPerBox: c.pattaPerBox, mlPerBottle: c.mlPerBottle,
@@ -126,17 +149,31 @@ const [dateFocused, setDateFocused] = useState(false);
             localId: c.localId, synced: c.synced,
           }));
           setProducts(paged);
-          setPagination({ page: 1, totalPages: 1, hasMore: filtered.length > paged.length, totalCount: filtered.length });
+          setPagination({ page: currentPage, totalPages: Math.ceil(filtered.length / 20) || 1, hasMore: filtered.length > paged.length, totalCount: filtered.length });
           return;
         }
         const res = await fetch(`/api/products?search=${encodeURIComponent(currentSearch)}&page=${currentPage}&limit=20`, { signal });
         const data = (await res.json()) as ProductsResponse;
+        let list: Product[] = [];
         if (Array.isArray(data)) {
-          setProducts(data as Product[]);
+          list = data as Product[];
+          setProducts(list);
           setPagination({ page: 1, totalPages: 1, hasMore: false, totalCount: data.length });
         } else {
+          list = data.products;
           if (currentPage === 1) setProducts(data.products); else setProducts((prev) => [...prev,...data.products]);
           setPagination(data.pagination);
+        }
+        // FIX: Cache for offline refresh
+        if (list.length > 0) {
+          try {
+            const offlineUser = getOfflineUser();
+            const userId = offlineUser?._id || "offline";
+            const toCache = list.map(p => ({
+              _id: p._id, localId: p._id, name: p.name, company: p.company||"", generic: p.generic||"", batchNo: p.batchNo||"", expiryDate: p.expiryDate, barcode: p.barcode||"", rack: p.rack||"", mainUnit: p.mainUnit, pattaPerBox: p.pattaPerBox, mlPerBottle: p.mlPerBottle, buyPrice: p.buyPrice, sellPrice: p.sellPrice, stock: p.stock, userId, synced: 1, createdAt: new Date().toISOString(),
+            } as OfflineProduct));
+            await offlineDB.products.bulkPut(toCache);
+          } catch {}
         }
       } catch (err) { if ((err as Error).name!== "AbortError") console.error(err); }
       finally { setLoading(false); setLoadingMore(false); }
@@ -144,11 +181,8 @@ const [dateFocused, setDateFocused] = useState(false);
     void load(search, page, controller.signal);
     return () => controller.abort();
   }, [search, page]);
-
-  useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    if (isOnline) void syncPendingProducts();
-  }, [isOnline, syncPendingProducts]);
+// eslint-disable-next-line react-hooks/set-state-in-effect
+  useEffect(() => { if (isOnline) void syncPendingProducts(); }, [isOnline, syncPendingProducts]);
 
   const handleSearchChange = (value: string) => { setSearch(value); setPage(1); };
 
@@ -159,12 +193,8 @@ const [dateFocused, setDateFocused] = useState(false);
     const stock = Number(form.stock);
     const ppb = Number(form.pattaPerBox) || 10;
     if (sellInput <= 0 || buy <= 0) { alert("Buy & Sell price required"); return; }
-
     let sellToStore = sellInput;
-    if (form.mainUnit === "box") {
-      sellToStore = sellInput / ppb;
-    }
-
+    if (form.mainUnit === "box") sellToStore = sellInput / ppb;
     const payload = {
       name: form.name.trim(), company: form.company || "Unknown", generic: form.generic, batchNo: form.batchNo,
       expiryDate: form.expiryDate || undefined, rack: form.rack, barcode: form.barcode,
@@ -233,26 +263,22 @@ const [dateFocused, setDateFocused] = useState(false);
   const ppbForm = Number(form.pattaPerBox) || 10;
   const buyForm = Number(form.buyPrice) || 0;
   const sellInputForm = Number(form.sellPrice) || 0;
-  let profitPerPatta = 0;
-  let profitPerBox = 0;
-  let sellPerPattaDisplay = 0;
+  let profitPerPatta = 0; let profitPerBox = 0; let sellPerPattaDisplay = 0;
   if (buyForm > 0 && sellInputForm > 0) {
     if (form.mainUnit === "box") {
       sellPerPattaDisplay = sellInputForm / ppbForm;
       profitPerPatta = sellPerPattaDisplay - buyForm / ppbForm;
       profitPerBox = sellInputForm - buyForm;
-    } else {
-      profitPerPatta = sellInputForm - buyForm;
-    }
+    } else { profitPerPatta = sellInputForm - buyForm; }
   }
 
   return (
     <div className="p-3 sm:p-6 max-w-6xl mx-auto min-h-screen bg-gray-50">
       {isOffline && <div className="mb-3 bg-amber-50 border border-amber-200 text-amber-800 text-[12px] p-2.5 rounded-xl text-center">📶 Offline • {pendingCount} pending</div>}
       {pendingCount > 0 &&!isOffline && <div className="mb-3 bg-blue-50 border border-blue-200 text-blue-800 text-[12px] p-2.5 rounded-xl flex justify-between"><span>{pendingCount} pending sync</span><button onClick={() => syncPendingProducts()} disabled={syncing} className="bg-blue-600 text-white px-3 py-1 rounded-lg text-[11px]">{syncing? "Syncing..." : "Sync Now"}</button></div>}
-      <div className="flex flex-col gap-3 mb-4"><h1 className="text-[20px] font-bold">💊 Yasir Medical - Stock V14.2.1 FIXED</h1><input placeholder="🔍 Search..." value={search} onChange={(e) => handleSearchChange(e.target.value)} className="border p-2.5 rounded-xl w-full sm:w-72 bg-white text-[14px]" /></div>
+      <div className="flex flex-col gap-3 mb-4"><h1 className="text-[20px] font-bold">💊 Yasir Medical - Stock V14.5 FINAL</h1><input placeholder="🔍 Search..." value={search} onChange={(e) => handleSearchChange(e.target.value)} className="border p-2.5 rounded-xl w-full sm:w-72 bg-white text-[14px]" /></div>
       <form onSubmit={handleSubmit} className="bg-white p-3 rounded-xl shadow-sm border mb-6">
-        <p className="font-semibold mb-3 text-[13px]">{editId? "Edit Medicine" : "Add New Medicine - V14.2.1"}</p>
+        <p className="font-semibold mb-3 text-[13px]">{editId? "Edit Medicine" : "Add New Medicine - V14.5"}</p>
         <div className="grid grid-cols-2 sm:grid-cols-12 gap-2">
           <input placeholder="Medicine Name" value={form.name} onChange={(e) => setForm({...form, name: e.target.value })} className="border p-2.5 rounded-lg col-span-2 sm:col-span-4 text-[13px]" required />
           <input placeholder="Company" value={form.company} onChange={(e) => setForm({...form, company: e.target.value })} className="border p-2.5 rounded-lg sm:col-span-3 text-[13px]" />
@@ -260,68 +286,64 @@ const [dateFocused, setDateFocused] = useState(false);
           <input placeholder="Batch No" value={form.batchNo} onChange={(e) => setForm({...form, batchNo: e.target.value })} className="border p-2.5 rounded-lg text-[13px]" />
           <input placeholder="Barcode" value={form.barcode} onChange={(e) => setForm({...form, barcode: e.target.value })} className="border p-2.5 rounded-lg text-[13px]" />
           <div className="relative w-full">
-  <input
-    type={dateFocused || form.expiryDate? "date" : "text"}
-    value={form.expiryDate || ""}
-    placeholder="Expiry Date"
-    onFocus={() => setDateFocused(true)}
-    onBlur={() => setDateFocused(false)}
-    onChange={(e) => setForm({...form, expiryDate: e.target.value })}
-    className="w-full border p-2.5 rounded-xl bg-white text-black text-[13px] min-h-11 block appearance-auto outline-none focus:ring-2 focus:ring-teal-600 placeholder:text-gray-400"
-    style={{ colorScheme: "light" }}
-  />
-</div>
+            <input type={dateFocused || form.expiryDate? "date" : "text"} value={form.expiryDate || ""} placeholder="Expiry Date" onFocus={() => setDateFocused(true)} onBlur={() => setDateFocused(false)} onChange={(e) => setForm({...form, expiryDate: e.target.value })} className="w-full border p-2.5 rounded-xl bg-white text-black text-[13px] min-h-11 block appearance-auto outline-none focus:ring-2 focus:ring-teal-600 placeholder:text-gray-400" style={{ colorScheme: "light" }} />
+          </div>
           <input placeholder="Rack" value={form.rack} onChange={(e) => setForm({...form, rack: e.target.value })} className="border p-2.5 rounded-lg text-[13px]" />
           <select value={form.mainUnit} onChange={(e) => setForm({...form, mainUnit: e.target.value as MainUnit })} className="border p-2.5 rounded-lg bg-white text-[13px] col-span-2">
-            <option value="box">Stock Main: Box (10 Patta) - Enter Buy/Sell per Box</option>
-            <option value="bottle">Stock Main: Bottle (120ml)</option>
+            <option value="box">Stock Main: Box (10 Patta)</option>
+            <option value="bottle">Stock Main: Bottle (60ml / 120ml)</option>
             <option value="tube">Stock Main: Tube</option>
             <option value="piece">Stock Main: Piece</option>
           </select>
           {form.mainUnit === "box" && <input placeholder="Patta/Box" type="number" value={form.pattaPerBox} onChange={(e) => setForm({...form, pattaPerBox: e.target.value })} className="border p-2.5 rounded-lg text-[13px]" />}
-          {form.mainUnit === "bottle" && <input placeholder="ml/Bottle" type="number" value={form.mlPerBottle} onChange={(e) => setForm({...form, mlPerBottle: e.target.value })} className="border p-2.5 rounded-lg text-[13px]" />}
-          <input placeholder={`Buy per ${form.mainUnit} (e.g. 300)`} type="number" step="0.01" value={form.buyPrice} onChange={(e) => setForm({...form, buyPrice: e.target.value })} className="border p-2.5 rounded-lg text-[13px] bg-red-50/50" required />
-          <input placeholder={form.mainUnit==="box"? "Sell per Box (e.g. 500)" : `Sell per ${form.mainUnit}`} type="number" step="0.01" value={form.sellPrice} onChange={(e) => setForm({...form, sellPrice: e.target.value })} className="border p-2.5 rounded-lg text-[13px] bg-blue-50/50" required />
-          <input placeholder={`Stock in ${form.mainUnit} ONLY`} type="number" step="0.001" value={form.stock} onChange={(e) => setForm({...form, stock: e.target.value })} className="border p-2.5 rounded-lg text-[13px]" required />
+          {form.mainUnit === "bottle" && <input placeholder="ml per Bottle" type="number" value={form.mlPerBottle} onChange={(e) => setForm({...form, mlPerBottle: e.target.value })} className="border p-2.5 rounded-lg text-[13px] bg-blue-50/50" />}
+          <input placeholder={`Buy per ${form.mainUnit}`} type="number" step="0.01" value={form.buyPrice} onChange={(e) => setForm({...form, buyPrice: e.target.value })} className="border p-2.5 rounded-lg text-[13px] bg-red-50/50" required />
+          <input placeholder={`Sell per ${form.mainUnit}`} type="number" step="0.01" value={form.sellPrice} onChange={(e) => setForm({...form, sellPrice: e.target.value })} className="border p-2.5 rounded-lg text-[13px] bg-blue-50/50" required />
+          <input placeholder={`Stock in ${form.mainUnit}`} type="number" step="0.001" value={form.stock} onChange={(e) => setForm({...form, stock: e.target.value })} className="border p-2.5 rounded-lg text-[13px]" required />
         </div>
         {buyForm>0 && sellInputForm>0 && (
           <p className={`mt-2 text-[12px] ${profitPerPatta > 0? "text-green-600" : "text-red-600"}`}>
-            {form.mainUnit==="box"? (
-              <>Box Buy {buyForm} → Patta Buy {(buyForm/ppbForm).toFixed(1)} | Box Sell {sellInputForm} → Patta Sell {sellPerPattaDisplay.toFixed(1)} | <b>Profit Patta: Rs.{profitPerPatta.toFixed(1)} | Profit Box: Rs.{profitPerBox.toFixed(1)}</b> • {form.stock} box = {Number(form.stock)*ppbForm} Patta</>
-            ) : (
-              <>Profit per {form.mainUnit}: Rs.{profitPerPatta.toFixed(1)} • Stock {form.stock} {form.mainUnit}</>
-            )}
+            {form.mainUnit==="box"? <>Box Buy {buyForm} → Patta {(buyForm/ppbForm).toFixed(1)} | Sell {sellInputForm} → Patta {sellPerPattaDisplay.toFixed(1)} | <b>Profit Patta {profitPerPatta.toFixed(1)} | Box {profitPerBox.toFixed(1)}</b></> : form.mainUnit==="bottle" ? <>Bottle {form.mlPerBottle}ml | Buy {buyForm} Sell {sellInputForm} Profit {profitPerPatta.toFixed(1)}</> : <>Profit per {form.mainUnit}: {profitPerPatta.toFixed(1)}</>}
           </p>
         )}
         <div className="flex gap-2 mt-3"><button type="submit" className="bg-green-600 text-white px-6 py-2 rounded-lg text-[13px]">{editId? "Update" : "+ Add Box/Bottle"}</button>{editId && <button type="button" onClick={() => { setEditId(null); setForm({ name: "", company: "", generic: "", batchNo: "", expiryDate: "", rack: "", barcode: "", mainUnit: "box", pattaPerBox: "10", mlPerBottle: "120", buyPrice: "", sellPrice: "", stock: "10" }); }} className="bg-gray-100 px-6 py-2 rounded-lg text-[13px]">Cancel</button>}</div>
       </form>
       {loading? <p className="text-center py-10 text-[13px]">Loading...</p> : (
-        <><div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">{products.map((p) => {
+        <>
+          {products.length===0 && isOffline && (
+            <div className="text-center py-10 bg-white rounded-xl border">
+              <p className="text-[14px] font-bold">📶 No offline data cached</p>
+              <p className="text-[12px] text-gray-500 mt-1">Go online once, wait for medicines to load, then offline will work on refresh</p>
+            </div>
+          )}
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">{products.map((p) => {
           const totalBuy = p.stock * p.buyPrice;
-          const sellPerBox = p.mainUnit==="box"? p.sellPrice * p.pattaPerBox : p.sellPrice;
-          const totalSell = p.stock * sellPerBox;
+          const isBox = p.mainUnit === "box"; const isBottle = p.mainUnit === "bottle";
+          const ppb = p.pattaPerBox || 10; const ml = p.mlPerBottle || 60;
+          const sellPerBoxOrBottle = isBox ? p.sellPrice * ppb : p.sellPrice;
+          const totalSell = p.stock * sellPerBoxOrBottle;
           const totalProfit = totalSell - totalBuy;
           return (
           <div key={p._id} className="bg-white border p-3 rounded-xl shadow-sm">
-            <div className="flex justify-between"><p className="font-semibold text-[13px]">{p.name}</p><span className="text-[10px] bg-gray-100 px-2 py-0.5 rounded-full">Stock: {p.mainUnit}</span></div>
-            <p className="text-[11px] text-gray-500">{p.company} {p.rack? `• ${p.rack}` : ""}</p>
+            <div className="flex justify-between items-start">
+              <p className="font-semibold text-[13px] truncate pr-2">{p.name}</p>
+              <span className="text-[10px] bg-gray-100 px-2 py-0.5 rounded-full whitespace-nowrap font-bold">Stock: {fmt1(p.stock)} {p.mainUnit}</span>
+            </div>
+            <p className="text-[11px] text-gray-500">{p.company} {p.rack? `• ${p.rack}` : ""} {isBottle ? `• ${ml}ml` : ""}</p>
             <div className="grid grid-cols-3 gap-1 mt-2 text-[10px]">
               <div className="bg-red-50 p-1.5 rounded text-center">
-                <div className="text-gray-500 text-[9px]">Buy/{p.mainUnit}</div>
+                <div className="text-gray-500 text-[9px]">Buy/{isBottle? "bottle" : p.mainUnit}</div>
                 <div className="font-bold text-[11px]">Rs.{fmt1(p.buyPrice)}</div>
+                {isBottle && <div className="text-[8px] text-gray-500">{ml}ml</div>}
                 <div className="mt-1 pt-1 border-t border-red-200 font-bold text-orange-700">Total Buy<br/>Rs.{fmt1(totalBuy)}</div>
-                <div className="text-[9px] text-gray-500">{fmt1(p.stock)} {p.mainUnit}</div>
               </div>
               <div className="bg-blue-50 p-1.5 rounded text-center">
-                <div className="text-gray-500 text-[9px]">Sell/{p.mainUnit==="box"?`Box`:`${p.mainUnit}`}</div>
-                <div className="font-bold text-[11px]">Rs.{p.mainUnit==="box"? fmt1(p.sellPrice) : fmt1(p.sellPrice)}/Patta</div>
-                <div className="text-[9px]">Box: Rs.{fmt1(sellPerBox)}</div>
+                {isBox ? <><div className="text-gray-500 text-[9px]">Sell/Patta</div><div className="font-bold text-[11px]">Rs.{fmt1(p.sellPrice)}</div><div className="text-[9px]">Box: Rs.{fmt1(sellPerBoxOrBottle)}</div></> : isBottle ? <><div className="text-gray-500 text-[9px]">Sell/bottle</div><div className="font-bold text-[11px]">Rs.{fmt1(p.sellPrice)}</div><div className="text-[9px]">{ml}ml</div></> : <><div className="text-gray-500 text-[9px]">Sell/{p.mainUnit}</div><div className="font-bold text-[11px]">Rs.{fmt1(p.sellPrice)}</div></>}
                 <div className="mt-1 pt-1 border-t border-blue-200 font-bold text-green-700">Total Sell<br/>Rs.{fmt1(totalSell)}</div>
               </div>
               <div className="bg-green-50 p-1.5 rounded text-center">
                 <div className="text-gray-500 text-[9px]">Stock</div>
-                <div className="font-bold text-[11px]">{fmt1(p.stock)} {p.mainUnit}</div>
-                <div className="text-[9px]">{p.mainUnit==="box"? `${fmt1(p.stock*p.pattaPerBox)} Patta` : `${p.mainUnit}`}</div>
+                {isBottle ? <><div className="font-bold text-[11px]">{fmt1(p.stock)} bottle</div><div className="text-[9px]">{fmt1(p.stock * ml)}ml total</div></> : isBox ? <><div className="font-bold text-[11px]">{fmt1(p.stock)} box</div><div className="text-[9px]">{fmt1(p.stock*ppb)} Patta</div></> : <><div className="font-bold text-[11px]">{fmt1(p.stock)} {p.mainUnit}</div></>}
                 <div className="mt-1 pt-1 border-t border-green-200 font-bold text-blue-700">Profit<br/>Rs.{fmt1(totalProfit)}</div>
               </div>
             </div>
