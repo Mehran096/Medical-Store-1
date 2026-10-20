@@ -1,12 +1,14 @@
 import dbConnect from "@/lib/mongodb";
 import Purchase from "@/models/Purchase";
 import Product from "@/models/Product";
+import Batch from "@/models/Batch";
 import { NextRequest, NextResponse } from "next/server";
 import { getServerSession } from "next-auth";
 import { authOptions } from "../auth/[...nextauth]/route";
 import { Types } from "mongoose";
 
 export const dynamic = "force-dynamic";
+export const runtime = "nodejs";
 
 type DateRange = {
   $gte: Date;
@@ -16,6 +18,30 @@ type DateRange = {
 type PurchaseQuery = {
   userId: Types.ObjectId;
   createdAt?: DateRange;
+};
+
+type PurchaseItemInput = {
+  productId?: string;
+  name: string;
+  company?: string;
+  quantity: number;
+  mainUnit?: "box" | "bottle" | "tube" | "piece";
+  buyPricePerUnit: number;
+  sellPricePerUnit?: number;
+  batchNo?: string;
+  expiryDate?: string;
+  barcode?: string;
+  rack?: string;
+};
+
+type PurchaseBody = {
+  supplier?: string;
+  invoiceNo?: string;
+  paymentType?: "cash" | "credit";
+  items: PurchaseItemInput[];
+  totalBuyAmount?: number;
+  localId?: string;
+  createdAt?: string;
 };
 
 const PKT_OFFSET_MS = 5 * 60 * 60 * 1000;
@@ -62,7 +88,7 @@ export async function GET(req: NextRequest) {
 
   const query: PurchaseQuery = {
     userId,
-  ...(dateRange? { createdAt: dateRange } : {}),
+    ...(dateRange ? { createdAt: dateRange } : {}),
   };
 
   const [purchases, totalCount, agg] = await Promise.all([
@@ -74,7 +100,7 @@ export async function GET(req: NextRequest) {
     ]),
   ]);
 
-  const totalPurchase = agg.length > 0? (agg[0] as { total: number }).total : 0;
+  const totalPurchase = agg.length > 0 ? (agg[0] as { total: number }).total : 0;
 
   return NextResponse.json({
     purchases,
@@ -88,26 +114,6 @@ export async function GET(req: NextRequest) {
   });
 }
 
-type PurchaseItemInput = {
-  productId?: string;
-  name: string;
-  company?: string;
-  quantity: number;
-  mainUnit?: "box" | "bottle" | "tube" | "piece";
-  buyPricePerUnit: number;
-  sellPricePerUnit?: number;
-};
-
-type PurchaseBody = {
-  supplier?: string;
-  invoiceNo?: string;
-  paymentType?: "cash" | "credit";
-  items: PurchaseItemInput[];
-  totalBuyAmount?: number;
-  localId?: string;
-  createdAt?: string;
-};
-
 export async function POST(req: NextRequest) {
   const session = await getServerSession(authOptions);
   if (!session?.user?.id) {
@@ -120,6 +126,16 @@ export async function POST(req: NextRequest) {
 
   if (!body.items?.length) {
     return NextResponse.json({ error: "items required" }, { status: 400 });
+  }
+
+  // Validate each item needs batchNo + expiryDate for batch system
+  for (const it of body.items) {
+    if (!it.batchNo || !it.expiryDate) {
+      return NextResponse.json({ error: `batchNo and expiryDate required for ${it.name}` }, { status: 400 });
+    }
+    if (Number(it.quantity) <= 0) {
+      return NextResponse.json({ error: `Invalid quantity for ${it.name}` }, { status: 400 });
+    }
   }
 
   const calculatedTotal = body.items.reduce(
@@ -139,42 +155,68 @@ export async function POST(req: NextRequest) {
       quantity: Number(it.quantity),
       mainUnit: it.mainUnit || "box",
       buyPricePerUnit: Number(it.buyPricePerUnit),
-      sellPricePerUnit: it.sellPricePerUnit? Number(it.sellPricePerUnit) : undefined,
-      productId: it.productId && Types.ObjectId.isValid(it.productId)? new Types.ObjectId(it.productId) : undefined,
+      sellPricePerUnit: it.sellPricePerUnit ? Number(it.sellPricePerUnit) : undefined,
+      productId: it.productId && Types.ObjectId.isValid(it.productId) ? new Types.ObjectId(it.productId) : undefined,
+      batchNo: it.batchNo,
+      expiryDate: it.expiryDate ? new Date(it.expiryDate) : undefined,
       totalBuy: Number(it.quantity) * Number(it.buyPricePerUnit),
     })),
     paymentType: body.paymentType || "cash",
-  ...(body.createdAt? { createdAt: new Date(body.createdAt) } : {}),
+    ...(body.createdAt ? { createdAt: new Date(body.createdAt) } : {}),
   });
 
   for (const it of body.items) {
+    const qty = Number(it.quantity);
+    const buyPrice = Number(it.buyPricePerUnit);
+    const sellPrice = it.sellPricePerUnit ? Number(it.sellPricePerUnit) : undefined;
+    const mainUnit = (it.mainUnit as "box" | "bottle" | "tube" | "piece") || "box";
+
+    let productId: Types.ObjectId;
+
     if (it.productId && Types.ObjectId.isValid(it.productId)) {
+      productId = new Types.ObjectId(it.productId);
       await Product.updateOne(
-        { _id: it.productId, userId },
+        { _id: productId, userId },
         {
-          $inc: { stock: Number(it.quantity) },
+          $inc: { stock: qty },
           $set: {
-            buyPrice: Number(it.buyPricePerUnit),
-          ...(it.sellPricePerUnit? { sellPrice: Number(it.sellPricePerUnit) } : {}),
+            buyPriceAvg: buyPrice,
+            lastSyncedAt: new Date(),
+            synced: true,
+            ...(sellPrice ? { sellPrice } : {}),
+            ...(it.rack ? { rack: it.rack } : {}),
           },
         }
       );
     } else {
-      await Product.create({
+      const newProduct = await Product.create({
         userId,
-        name: it.name,
+        name: it.name.trim(),
         company: it.company || "Unknown",
         generic: "",
-        batchNo: "",
-        rack: "",
-        mainUnit: (it.mainUnit as "box" | "bottle" | "tube" | "piece") || "box",
+        barcode: it.barcode || undefined,
+        rack: it.rack || "",
+        mainUnit,
         pattaPerBox: 10,
         mlPerBottle: 120,
-        buyPrice: Number(it.buyPricePerUnit),
-        sellPrice: Number(it.sellPricePerUnit || it.buyPricePerUnit * 1.2),
-        stock: Number(it.quantity),
+        buyPriceAvg: buyPrice,
+        sellPrice: sellPrice || Math.round(buyPrice * 1.2),
+        stock: qty,
+        synced: true,
+        lastSyncedAt: new Date(),
       });
+      productId = newProduct._id as Types.ObjectId;
     }
+
+    // CREATE BATCH - This was missing in your old file
+    await Batch.create({
+      productId,
+      batchNo: it.batchNo?.trim() || `B-${Date.now()}`,
+      expiryDate: it.expiryDate ? new Date(it.expiryDate) : new Date(Date.now() + 365 * 24 * 60 * 60 * 1000),
+      buyPrice,
+      quantity: qty,
+      userId,
+    });
   }
 
   return NextResponse.json(purchase, { status: 201 });

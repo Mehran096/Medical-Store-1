@@ -1,5 +1,6 @@
 import dbConnect from "@/lib/mongodb";
 import Product from "@/models/Product";
+import Batch from "@/models/Batch";
 import Sale from "@/models/Sale";
 import Customer from "@/models/Customer";
 import { NextRequest, NextResponse } from "next/server";
@@ -19,15 +20,32 @@ type SaleUpdateBody = {
   quantity?: number;
   sellUnit?: SellUnit;
   mainUnit?: MainUnit;
-  sellPrice?: number; // EDITABLE at counter
+  sellPrice?: number;
   customerName?: string;
   paymentType?: string;
   status?: SaleStatus;
   isCredit?: boolean;
 };
 
-function isValidObjectId(id: string): boolean { return Types.ObjectId.isValid(id); }
-function normalizeName(name: string | undefined): string { return (name || "Walk-in").trim() || "Walk-in"; }
+function isValidObjectId(id: string): boolean { 
+  return Types.ObjectId.isValid(id); 
+}
+
+function normalizeName(name: string | undefined): string { 
+  return (name || "Walk-in").trim() || "Walk-in"; 
+}
+
+function calcDeduction(mainUnit: MainUnit, sellUnit: SellUnit, qty: number, ppb: number, mlB: number) {
+  let deductionMain = 0;
+  if (mainUnit === "box") {
+    if (sellUnit === "patta") deductionMain = qty / ppb;
+    else if (sellUnit === "half_patta") deductionMain = (qty * 0.5) / ppb;
+    else deductionMain = qty;
+  } else {
+    deductionMain = sellUnit === "ml" ? qty / mlB : qty;
+  }
+  return Math.round(deductionMain * 1000) / 1000;
+}
 
 async function upsertKhataGrouped(userId: Types.ObjectId, name: string, amount: number, saleId: Types.ObjectId) {
   const safeName = normalizeName(name);
@@ -77,30 +95,65 @@ export async function PUT(req: NextRequest, { params }: Params) {
     const newSellPrice = body.sellPrice ?? existingSale.sellPrice;
     const oldTotal = Math.round(existingSale.total);
     const oldDeduct = existingSale.deductionMain ?? 0;
+    const oldBatchId = existingSale.batchId;
 
     if (newQuantity < 0.001) return NextResponse.json({ error: "Valid quantity required" }, { status: 400 });
 
     const ppb = existingSale.pattaPerBox ?? 10;
     const mlB = existingSale.mlPerBottle ?? 120;
-    let newDeduct = 0;
-    if (newMainUnit === "box") {
-      if (newSellUnit === "patta") newDeduct = newQuantity / ppb;
-      else if (newSellUnit === "half_patta") newDeduct = (newQuantity * 0.5) / ppb;
-      else newDeduct = newQuantity;
-    } else {
-      newDeduct = newSellUnit === "ml" ? newQuantity / mlB : newQuantity;
-    }
-    newDeduct = Math.round(newDeduct * 1000) / 1000;
+    const newDeduct = calcDeduction(newMainUnit, newSellUnit, newQuantity, ppb, mlB);
+    const diff = Math.round((newDeduct - oldDeduct) * 1000) / 1000;
 
-    const diff = newDeduct - oldDeduct;
+    // STEP 1: Restore old batch quantity first
+    if (oldBatchId) {
+      await Batch.updateOne({ _id: oldBatchId }, { $inc: { quantity: oldDeduct } });
+    }
+
+    // STEP 2: Check stock for diff
     if (diff > 0.0001) {
       const product = await Product.findOne({ _id: existingSale.productId, userId: userObjectId });
-      if (!product) return NextResponse.json({ error: "Product not found" }, { status: 404 });
+      if (!product) {
+        // rollback restore
+        if (oldBatchId) await Batch.updateOne({ _id: oldBatchId }, { $inc: { quantity: -oldDeduct } });
+        return NextResponse.json({ error: "Product not found" }, { status: 404 });
+      }
       if (product.stock < diff - 0.0001) {
+        if (oldBatchId) await Batch.updateOne({ _id: oldBatchId }, { $inc: { quantity: -oldDeduct } });
         return NextResponse.json({ error: `Only ${product.stock} ${newMainUnit} left` }, { status: 400 });
       }
     }
 
+    // STEP 3: FIFO deduct from batches for new quantity
+    const allBatches = await Batch.find({ 
+      productId: existingSale.productId, 
+      quantity: { $gt: 0 } 
+    }).sort({ expiryDate: 1 });
+
+    let remaining = newDeduct;
+    let firstBatchUsed: typeof allBatches[0] | null = null;
+    
+    for (const batch of allBatches) {
+      if (remaining <= 0) break;
+      const take = Math.min(batch.quantity, remaining);
+      await Batch.updateOne({ _id: batch._id }, { $inc: { quantity: -take } });
+      if (!firstBatchUsed) firstBatchUsed = batch;
+      remaining = Math.round((remaining - take) * 1000) / 1000;
+    }
+
+    if (remaining > 0.0001) {
+      // Not enough batch stock - rollback
+      if (firstBatchUsed) {
+        // restore what we deducted
+        for (const b of allBatches) {
+          const wasDeducted = Math.min(b.quantity, newDeduct - remaining);
+          if (wasDeducted > 0) await Batch.updateOne({ _id: b._id }, { $inc: { quantity: wasDeducted } });
+        }
+      }
+      if (oldBatchId) await Batch.updateOne({ _id: oldBatchId }, { $inc: { quantity: -oldDeduct } });
+      return NextResponse.json({ error: "Not enough batch stock" }, { status: 400 });
+    }
+
+    // STEP 4: Update product stock
     if (Math.abs(diff) > 0.0001) {
       await Product.findOneAndUpdate(
         { _id: existingSale.productId, userId: userObjectId },
@@ -112,10 +165,21 @@ export async function PUT(req: NextRequest, { params }: Params) {
     const oldNormalized = oldCustomerName.toLowerCase();
     const oldIsCredit = existingSale.isCredit || existingSale.status === "pending";
 
+    // STEP 5: Update sale fields with new batch info
     existingSale.quantity = newQuantity;
-    existingSale.sellUnit = newSellUnit; // patta/half_patta/box decided at counter - editable
+    existingSale.sellUnit = newSellUnit;
     existingSale.mainUnit = newMainUnit;
-    existingSale.sellPrice = Number(newSellPrice); // EDITABLE
+    existingSale.sellPrice = Number(newSellPrice);
+    existingSale.deductionMain = newDeduct;
+    existingSale.deductionPatta = newMainUnit === "box" ? newDeduct * ppb : 0;
+    
+    if (firstBatchUsed) {
+      existingSale.batchId = firstBatchUsed._id;
+      existingSale.batchNo = firstBatchUsed.batchNo;
+      existingSale.expiryDate = firstBatchUsed.expiryDate;
+      existingSale.buyPriceMain = firstBatchUsed.buyPrice;
+    }
+
     if (body.customerName) existingSale.customerName = body.customerName.trim();
     if (body.paymentType) {
       const raw = body.paymentType.toLowerCase();
@@ -128,7 +192,30 @@ export async function PUT(req: NextRequest, { params }: Params) {
       existingSale.isCredit = body.status === "pending";
     }
 
-    await existingSale.save(); // pre-validate recalculates total/profit/deduction
+    // Recalculate total/profit based on new batch buyPrice
+    const buyPrice = existingSale.buyPriceMain ?? 0;
+    let total = 0;
+    let profit = 0;
+    if (newMainUnit === "box") {
+      const buyPerPatta = buyPrice / ppb;
+      if (newSellUnit === "patta") {
+        total = Number(newSellPrice) * newQuantity;
+        profit = (Number(newSellPrice) - buyPerPatta) * newQuantity;
+      } else if (newSellUnit === "half_patta") {
+        total = Number(newSellPrice) * newQuantity;
+        profit = (Number(newSellPrice) - buyPerPatta/2) * newQuantity;
+      } else {
+        total = Number(newSellPrice) * newQuantity;
+        profit = (Number(newSellPrice) - buyPrice) * newQuantity;
+      }
+    } else {
+      total = Number(newSellPrice) * newQuantity;
+      profit = (Number(newSellPrice) - buyPrice) * newQuantity;
+    }
+    existingSale.total = Math.round(total);
+    existingSale.profit = Math.round(profit);
+
+    await existingSale.save();
 
     try {
       const newIsCredit = existingSale.isCredit || existingSale.status === "pending";
@@ -165,7 +252,8 @@ export async function PUT(req: NextRequest, { params }: Params) {
     }
 
     return NextResponse.json(existingSale);
-  } catch {
+  } catch (error) {
+    console.error("PUT /api/sales/[id] error", error);
     return NextResponse.json({ error: "Failed to update sale" }, { status: 400 });
   }
 }
@@ -183,10 +271,26 @@ export async function DELETE(_req: NextRequest, { params }: Params) {
     if (!saleDoc) return NextResponse.json({ error: "Sale not found" }, { status: 404 });
 
     const restoreQty = saleDoc.deductionMain ?? saleDoc.quantity;
+    
+    // Restore product stock
     await Product.findOneAndUpdate(
       { _id: saleDoc.productId, userId: userObjectId },
       { $inc: { stock: restoreQty }, $set: { lastSyncedAt: new Date() } }
     );
+
+    // Restore batch stock - THIS WAS MISSING
+    if (saleDoc.batchId) {
+      await Batch.updateOne(
+        { _id: saleDoc.batchId },
+        { $inc: { quantity: restoreQty } }
+      );
+    } else {
+      // Legacy sale without batchId - restore to earliest batch
+      const earliest = await Batch.findOne({ productId: saleDoc.productId }).sort({ expiryDate: 1 });
+      if (earliest) {
+        await Batch.updateOne({ _id: earliest._id }, { $inc: { quantity: restoreQty } });
+      }
+    }
 
     if (saleDoc.isCredit || saleDoc.status === "pending" || saleDoc.paymentType === "credit") {
       try {

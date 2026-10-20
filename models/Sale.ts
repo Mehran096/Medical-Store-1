@@ -6,17 +6,22 @@ export type SellUnit = "patta" | "half_patta" | "box" | "bottle" | "ml" | "tube"
 export interface ISale {
   productId: Types.ObjectId;
   productName: string;
+  batchId?: Types.ObjectId; // <-- NEW: which expiry batch was sold
+  batchNo?: string;
+  expiryDate?: Date; // snapshot for bill
+
   mainUnit: MainUnit;
   sellUnit: SellUnit;
   quantity: number;
   pattaPerBox: number;
   mlPerBottle: number;
-  buyPriceMain: number;
+  buyPriceMain: number; // from BATCH now, not product
   sellPrice: number;
   total: number;
   profit: number;
   deductionMain: number;
   deductionPatta: number;
+  
   userId: Types.ObjectId;
   customerName?: string;
   paymentType?: string;
@@ -28,12 +33,16 @@ export interface ISale {
 const SaleSchema = new Schema<ISale>({
   productId: { type: Schema.Types.ObjectId, ref: "Product", required: true },
   productName: { type: String, required: true },
+  batchId: { type: Schema.Types.ObjectId, ref: "Batch" }, // NEW
+  batchNo: { type: String, default: "" },
+  expiryDate: { type: Date },
+
   mainUnit: { type: String, enum: ["box","bottle","tube","piece"], required: true },
   sellUnit: { type: String, enum: ["patta","half_patta","box","bottle","ml","tube","piece"], required: true, default: "patta" },
   quantity: { type: Number, required: true, min: 0.001 },
   pattaPerBox: { type: Number, default: 10 },
   mlPerBottle: { type: Number, default: 120 },
-  buyPriceMain: { type: Number, required: true },
+  buyPriceMain: { type: Number, required: true }, // will come from Batch.buyPrice
   sellPrice: { type: Number, required: true },
   total: { type: Number, required: true },
   profit: { type: Number, required: true },
@@ -88,7 +97,6 @@ SaleSchema.pre("validate", function(){
       profit = (this.sellPrice - this.buyPriceMain) * qty;
     }
   } else {
-    // tube / piece
     deductMain = qty;
     total = this.sellPrice * qty;
     profit = (this.sellPrice - this.buyPriceMain) * qty;
@@ -102,6 +110,7 @@ SaleSchema.pre("validate", function(){
 
 SaleSchema.index({ userId: 1, createdAt: -1 });
 SaleSchema.index({ userId: 1, productName: 1 });
+SaleSchema.index({ userId: 1, batchId: 1 });
 
 const Sale = (models.Sale as Model<ISale>) || model<ISale>("Sale", SaleSchema);
 export default Sale;

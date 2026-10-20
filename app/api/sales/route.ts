@@ -1,5 +1,6 @@
 import dbConnect from "@/lib/mongodb";
 import Product from "@/models/Product";
+import Batch from "@/models/Batch";
 import Sale from "@/models/Sale";
 import Customer from "@/models/Customer";
 import { NextRequest, NextResponse } from "next/server";
@@ -10,18 +11,32 @@ import { Types } from "mongoose";
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
-type SaleStatus = "paid" | "pending" | "partial";
+type SaleStatus = "paid" | "pending";
 type MainUnit = "box" | "bottle" | "tube" | "piece";
 type SellUnit = "patta" | "half_patta" | "box" | "bottle" | "ml" | "tube" | "piece";
 
 type SaleBody = {
-  productId: string; quantity: number;
-  sellUnit?: SellUnit; mainUnit?: MainUnit;
-  sellPrice?: number; buyPriceMain?: number;
-  pattaPerBox?: number; mlPerBottle?: number;
-  soldBy?: string; localId?: string;
-  customerName?: string; customerPhone?: string;
-  customerVillage?: string; paymentType?: string;
+  productId: string; 
+  quantity: number;
+  sellUnit?: SellUnit; 
+  mainUnit?: MainUnit;
+  sellPrice?: number;
+  pattaPerBox?: number; 
+  mlPerBottle?: number;
+  soldBy?: string; 
+  localId?: string;
+  customerName?: string; 
+  customerPhone?: string;
+  customerVillage?: string; 
+  paymentType?: string;
+  batchId?: string;
+  batchNo?: string;
+  expiryDate?: string;
+  buyPriceMain?: number;
+  total?: number;
+  profit?: number;
+  deductionMain?: number;
+  deductionPatta?: number;
 };
 
 type DateFilter = { $gte: Date; $lte?: Date };
@@ -39,14 +54,33 @@ type CustomerQuery = {
   name?: SearchRegex;
 };
 
+type CreatedSaleInfo = { _id: Types.ObjectId; total: number };
+
 function getDateRange(filter: string): { start: Date; end: Date } {
-  const now = new Date(); const start = new Date(now); const end = new Date(now);
+  const now = new Date(); 
+  const start = new Date(now); 
+  const end = new Date(now);
   if (filter === "today") start.setHours(0,0,0,0);
-  else if (filter === "yesterday") { start.setDate(now.getDate()-1); start.setHours(0,0,0,0); end.setDate(now.getDate()-1); end.setHours(23,59,59,999); }
+  else if (filter === "yesterday") { 
+    start.setDate(now.getDate()-1); start.setHours(0,0,0,0); 
+    end.setDate(now.getDate()-1); end.setHours(23,59,59,999); 
+  }
   else if (filter === "weekly") { start.setDate(now.getDate()-7); start.setHours(0,0,0,0); }
   else if (filter === "monthly") { start.setDate(1); start.setHours(0,0,0,0); }
   else if (filter === "yearly") { start.setMonth(0,1); start.setHours(0,0,0,0); }
   return { start, end };
+}
+
+function calcDeduction(mainUnit: MainUnit, sellUnit: SellUnit, qty: number, ppb: number, mlB: number) {
+  let deductionMain = 0;
+  if (mainUnit === "box") {
+    if (sellUnit === "patta") deductionMain = qty / ppb;
+    else if (sellUnit === "half_patta") deductionMain = (qty * 0.5) / ppb;
+    else deductionMain = qty;
+  } else {
+    deductionMain = sellUnit === "ml" ? qty / mlB : qty;
+  }
+  return Math.round(deductionMain * 1000) / 1000;
 }
 
 export async function GET(req: NextRequest) {
@@ -91,9 +125,7 @@ export async function GET(req: NextRequest) {
     }
 
     const customerQuery: CustomerQuery = { userId: userObjectId, isPaid: false };
-    if (search) {
-      customerQuery.name = { $regex: search, $options: "i" };
-    }
+    if (search) customerQuery.name = { $regex: search, $options: "i" };
 
     const [sales, totalCount, totalAgg, pendingAgg] = await Promise.all([
       Sale.find(saleQuery).sort({ createdAt: -1 }).skip(skip).limit(limit).lean(),
@@ -135,77 +167,157 @@ export async function POST(req: NextRequest) {
     const body = (await req.json()) as SaleBody;
     if (!body.productId || body.quantity === undefined) return NextResponse.json({ error: "productId, quantity required" }, { status: 400 });
     if (body.quantity < 0.001) return NextResponse.json({ error: "Quantity must be > 0" }, { status: 400 });
+    
     const userObjectId = new Types.ObjectId(session.user.id);
+    const productObjectId = new Types.ObjectId(body.productId);
+    
     if (body.localId) {
       const existing = await Sale.findOne({ localId: body.localId, userId: userObjectId }).lean();
       if (existing) return NextResponse.json(existing, { status: 200 });
     }
+    
     if (!Types.ObjectId.isValid(body.productId)) return NextResponse.json({ error: "Invalid productId" }, { status: 400 });
-    const product = await Product.findOne({ _id: body.productId, userId: userObjectId });
+    
+    const product = await Product.findOne({ _id: productObjectId, userId: userObjectId });
     if (!product) return NextResponse.json({ error: "Product not found" }, { status: 404 });
 
     const quantity = Number(body.quantity);
-    // ✅ FINAL V14.2: mainUnit ONLY from Product, sellUnit decided at counter
     const mainUnit = (body.mainUnit ?? product.mainUnit) as MainUnit;
     const sellUnit = (body.sellUnit ?? (mainUnit === "box" ? "patta" : mainUnit)) as SellUnit;
     const ppb = Number(body.pattaPerBox?? product.pattaPerBox?? 10);
     const mlB = Number(body.mlPerBottle?? product.mlPerBottle?? 120);
-    const buyMain = Number(body.buyPriceMain?? product.buyPrice?? 0);
-    const sellPrice = Number(body.sellPrice?? product.sellPrice?? 0); // EDITABLE at counter
+    const sellPrice = Number(body.sellPrice?? product.sellPrice?? 0);
 
-    let deductionMain = 0;
-    if (mainUnit === "box") {
-      if (sellUnit === "patta") deductionMain = quantity / ppb;
-      else if (sellUnit === "half_patta") deductionMain = (quantity * 0.5) / ppb;
-      else deductionMain = quantity;
-    } else {
-      deductionMain = sellUnit === "ml"? quantity / mlB : quantity;
+    if (body.batchId && body.deductionMain) {
+      const batch = await Batch.findById(body.batchId);
+      const sale = await Sale.create({
+        productId: productObjectId,
+        productName: product.name,
+        batchId: batch?._id,
+        batchNo: body.batchNo ?? batch?.batchNo,
+        expiryDate: body.expiryDate ? new Date(body.expiryDate) : batch?.expiryDate,
+        mainUnit, sellUnit, quantity,
+        pattaPerBox: ppb, mlPerBottle: mlB,
+        buyPriceMain: body.buyPriceMain ?? batch?.buyPrice ?? product.buyPriceAvg,
+        sellPrice,
+        total: body.total ?? Math.round(sellPrice * quantity),
+        profit: body.profit ?? 0,
+        deductionMain: body.deductionMain,
+        deductionPatta: body.deductionPatta ?? 0,
+        userId: userObjectId,
+        localId: body.localId || `online_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`,
+        customerName: body.customerName?.trim() || "Walk-in",
+        paymentType: body.paymentType === "credit" || body.paymentType === "udhar" ? "credit" : (body.paymentType ?? "cash"),
+        status: (body.paymentType === "credit" || body.paymentType === "udhar") ? "pending" as SaleStatus : "paid" as SaleStatus,
+        isCredit: body.paymentType === "credit" || body.paymentType === "udhar",
+      });
+      
+      await Product.findOneAndUpdate({ _id: productObjectId, userId: userObjectId }, { $inc: { stock: -Number(body.deductionMain) } });
+      return NextResponse.json(sale, { status: 201 });
     }
-    deductionMain = Math.round(deductionMain * 1000) / 1000;
 
-    if (!body.localId && product.stock < deductionMain - 0.0001) {
-      return NextResponse.json({ error: `Only ${product.stock} ${mainUnit} left (${mainUnit==="box"? Math.floor(product.stock*ppb)+" Patta":""})` }, { status: 400 });
+    const needMain = calcDeduction(mainUnit, sellUnit, quantity, ppb, mlB);
+    
+    const allBatches = await Batch.find({ 
+      productId: product._id, 
+      quantity: { $gt: 0 } 
+    }).sort({ expiryDate: 1 });
+
+    if (allBatches.length === 0 || product.stock < needMain - 0.0001) {
+      return NextResponse.json({ error: `Only ${product.stock} ${mainUnit} left` }, { status: 400 });
     }
 
+    let remaining = needMain;
+    const createdSales: CreatedSaleInfo[] = [];
+    
     const isCredit = body.paymentType === "credit" || body.paymentType === "udhar";
     const customerName = body.customerName?.trim() || "Walk-in";
-    const status: SaleStatus = isCredit? "pending" : "paid";
-    if (isCredit && customerName.toLowerCase() === "walk-in") return NextResponse.json({ error: "Customer name required for Udhar" }, { status: 400 });
+    const status: SaleStatus = isCredit ? "pending" : "paid";
 
-    const sale = await Sale.create({
-      productId: new Types.ObjectId(body.productId),
-      productName: product.name,
-      mainUnit,
-      sellUnit, // patta/half_patta/box decided at counter
-      quantity,
-      pattaPerBox: ppb,
-      mlPerBottle: mlB,
-      buyPriceMain: buyMain,
-      sellPrice, // EDITABLE - e.g., 100 Rs per patta
-      total: 0, // calculated in pre-validate
-      profit: 0,
-      deductionMain,
-      userId: userObjectId,
-      localId: body.localId || `online_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`,
-      customerName,
-      paymentType: isCredit? "credit" : (body.paymentType ?? "cash"),
-      status,
-      isCredit,
-    });
+    if (isCredit && customerName.toLowerCase() === "walk-in") {
+      return NextResponse.json({ error: "Customer name required for Udhar" }, { status: 400 });
+    }
 
-    if (isCredit) {
+    for (const batch of allBatches) {
+      if (remaining <= 0) break;
+      
+      const take = Math.min(batch.quantity, remaining);
+      const ratio = take / needMain;
+      const qtyForThisBatch = quantity * ratio;
+
+      let total = 0;
+      let profit = 0;
+      if (mainUnit === "box") {
+        const buyPerPatta = batch.buyPrice / ppb;
+        if (sellUnit === "patta") {
+          total = sellPrice * qtyForThisBatch;
+          profit = (sellPrice - buyPerPatta) * qtyForThisBatch;
+        } else if (sellUnit === "half_patta") {
+          total = sellPrice * qtyForThisBatch;
+          profit = (sellPrice - buyPerPatta/2) * qtyForThisBatch;
+        } else {
+          total = sellPrice * qtyForThisBatch;
+          profit = (sellPrice - batch.buyPrice) * qtyForThisBatch;
+        }
+      } else {
+        total = sellPrice * qtyForThisBatch;
+        profit = (sellPrice - batch.buyPrice) * qtyForThisBatch;
+      }
+
+      const saleDoc = await Sale.create({
+        productId: productObjectId,
+        productName: product.name,
+        batchId: batch._id,
+        batchNo: batch.batchNo,
+        expiryDate: batch.expiryDate,
+        mainUnit,
+        sellUnit,
+        quantity: Math.round(qtyForThisBatch * 1000) / 1000,
+        pattaPerBox: ppb,
+        mlPerBottle: mlB,
+        buyPriceMain: batch.buyPrice,
+        sellPrice,
+        total: Math.round(total),
+        profit: Math.round(profit),
+        deductionMain: take,
+        deductionPatta: mainUnit === "box" ? take * ppb : 0,
+        userId: userObjectId,
+        localId: body.localId ? `${body.localId}_${createdSales.length}` : `online_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`,
+        customerName,
+        paymentType: isCredit ? "credit" : (body.paymentType ?? "cash"),
+        status,
+        isCredit,
+      });
+
+      await Batch.updateOne({ _id: batch._id }, { $inc: { quantity: -take } });
+      createdSales.push({ _id: saleDoc._id as Types.ObjectId, total: saleDoc.total as number });
+      remaining = Math.round((remaining - take) * 1000) / 1000;
+    }
+
+    await Product.findOneAndUpdate({ _id: productObjectId, userId: userObjectId }, { $inc: { stock: -needMain }, $set: { lastSyncedAt: new Date() } });
+
+    if (isCredit && createdSales.length > 0) {
       try {
-        const customerDoc = await upsertKhataGrouped(userObjectId, customerName, sale.total, sale._id as Types.ObjectId, body.customerPhone || "", body.customerVillage || "");
+        const totalForKhata = createdSales.reduce((sum, item) => sum + item.total, 0);
+        const firstId = createdSales[0]._id;
+        const customerDoc = await upsertKhataGrouped(userObjectId, customerName, totalForKhata, firstId, body.customerPhone || "", body.customerVillage || "");
         if (customerDoc?._id) {
-          await Sale.updateOne({ _id: sale._id }, { $set: { customerId: customerDoc._id } });
+          for (const s of createdSales) {
+            await Sale.updateOne({ _id: s._id }, { $set: { customerId: customerDoc._id } });
+          }
         }
       } catch (err) {
         console.error("Khata grouping error:", err);
       }
     }
 
-    await Product.findOneAndUpdate({ _id: body.productId, userId: userObjectId }, { $inc: { stock: -deductionMain }, $set: { lastSyncedAt: new Date() } });
-    return NextResponse.json(sale, { status: 201 });
+    if (createdSales.length === 1) {
+      const firstSale = await Sale.findById(createdSales[0]._id).lean();
+      return NextResponse.json(firstSale, { status: 201 });
+    } else {
+      const allSales = await Sale.find({ _id: { $in: createdSales.map(c => c._id) } }).lean();
+      return NextResponse.json(allSales, { status: 201 });
+    }
   } catch (error) {
     console.error("POST /api/sales error:", error);
     return NextResponse.json({ error: "Failed to create sale" }, { status: 500 });

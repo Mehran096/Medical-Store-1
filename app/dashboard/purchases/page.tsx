@@ -9,7 +9,8 @@ type Product = {
   name: string;
   company?: string;
   buyPrice: number;
-  sellPrice: number; // in DB this is per Patta for box
+  buyPriceAvg?: number;
+  sellPrice: number;
   stock: number;
   mainUnit: "box" | "bottle" | "tube" | "piece";
   pattaPerBox?: number;
@@ -21,10 +22,12 @@ type BillItem = {
   name: string;
   company?: string;
   quantity: number;
-  buyPricePerUnit: number; // always per BOX in UI for box
-  sellPricePerUnit: number; // always per BOX in UI for box
+  buyPricePerUnit: number;
+  sellPricePerUnit: number;
   mainUnit: Product["mainUnit"];
-  pattaPerBox: number; // keep for conversion when saving
+  pattaPerBox: number;
+  batchNo: string;
+  expiryDate: string;
 };
 
 export default function PurchasesPage() {
@@ -54,7 +57,8 @@ export default function PurchasesPage() {
             _id: o._id || o.localId,
             name: o.name,
             company: o.company,
-            buyPrice: o.buyPrice,
+            buyPrice: o.buyPriceAvg || 0,
+            buyPriceAvg: o.buyPriceAvg,
             sellPrice: o.sellPrice,
             stock: o.stock,
             mainUnit: o.mainUnit,
@@ -76,17 +80,18 @@ export default function PurchasesPage() {
   const addToBill = (p: Product) => {
     if (bill.find((b) => b.productId === p._id)) { setSearch(""); setProducts([]); return; }
     const ppb = p.pattaPerBox || 10;
-    // FIX: Convert Patta sell to Box sell for display
     const displaySell = p.mainUnit === "box" ? p.sellPrice * ppb : p.sellPrice;
     setBill(prev => [...prev, { 
       productId: p._id, 
       name: p.name, 
       company: p.company, 
       quantity: 1, 
-      buyPricePerUnit: p.buyPrice, // already per box/bottle
-      sellPricePerUnit: displaySell, // now per box for box
+      buyPricePerUnit: p.buyPriceAvg || p.buyPrice,
+      sellPricePerUnit: displaySell,
       mainUnit: p.mainUnit,
-      pattaPerBox: ppb
+      pattaPerBox: ppb,
+      batchNo: "",
+      expiryDate: ""
     }]);
     setSearch(""); setProducts([]);
   };
@@ -94,15 +99,17 @@ export default function PurchasesPage() {
   const addCustom = () => {
     if (!search.trim()) return;
     if (bill.find(b => b.name.toLowerCase() === search.trim().toLowerCase())) { setSearch(""); return; }
-    setBill(prev => [...prev, { name: search.trim(), company: "", quantity: 1, buyPricePerUnit: 0, sellPricePerUnit: 0, mainUnit: "box", pattaPerBox: 10 }]);
+    setBill(prev => [...prev, { name: search.trim(), company: "", quantity: 1, buyPricePerUnit: 0, sellPricePerUnit: 0, mainUnit: "box", pattaPerBox: 10, batchNo: "", expiryDate: "" }]);
     setSearch(""); setProducts([]);
   };
 
-  const updateQty = (idx: number, val: string) => {
-    setBill(prev => prev.map((b,i) => i!==idx? b : val===""? {...b, quantity:0} : {...b, quantity: parseInt(val.replace(/[^0-9]/g,""))||0}));
-  };
-  const updatePrice = (idx: number, field: "buyPricePerUnit"|"sellPricePerUnit", val: string) => {
-    setBill(prev => prev.map((b,i) => i!==idx? b : val===""? {...b, [field]:0} : {...b, [field]: parseFloat(val)||0}));
+  const updateField = (idx: number, field: keyof BillItem, val: string) => {
+    setBill(prev => prev.map((b,i) => {
+      if (i!==idx) return b;
+      if (field === "quantity") return { ...b, quantity: val==="" ? 0 : parseInt(val.replace(/[^0-9]/g,""))||0 };
+      if (field === "buyPricePerUnit" || field === "sellPricePerUnit") return { ...b, [field]: val==="" ? 0 : parseFloat(val)||0 };
+      return { ...b, [field]: val };
+    }));
   };
 
   const totalBuy = bill.reduce((s, it) => s + it.quantity * it.buyPricePerUnit, 0);
@@ -111,25 +118,27 @@ export default function PurchasesPage() {
     if (!bill.length) return alert("Add medicines first");
     const clean = bill.filter(b => b.quantity>0);
     if(!clean.length) return alert("Qty can't be 0");
+    
+    for (const it of clean) {
+      if (!it.batchNo.trim()) return alert(`Batch No required for ${it.name}`);
+      if (!it.expiryDate) return alert(`Expiry Date required for ${it.name}`);
+    }
 
-    // FIX: Convert Box sell back to Patta sell before saving to DB/API
     const itemsForApi = clean.map(c=>{
       if(c.mainUnit === "box"){
-        return {
-          ...c,
-          // API/DB expects sellPrice per Patta
-          sellPricePerUnit: c.sellPricePerUnit / (c.pattaPerBox || 10),
-        };
+        return { ...c, sellPricePerUnit: c.sellPricePerUnit / (c.pattaPerBox || 10) };
       }
       return c;
     });
 
     const offlineItems: OfflinePurchaseItem[] = itemsForApi.map(c=>({
-      productId: c.productId,
+      productId: c.productId || `local_${Date.now()}_${c.name}`,
       name: c.name,
       company: c.company,
       quantity: c.quantity,
       mainUnit: c.mainUnit,
+      batchNo: c.batchNo.trim(),
+      expiryDate: new Date(c.expiryDate).toISOString(),
       buyPricePerUnit: c.buyPricePerUnit,
       sellPricePerUnit: c.sellPricePerUnit,
     }));
@@ -137,7 +146,7 @@ export default function PurchasesPage() {
     const totalAmount = clean.reduce((s,it)=>s+it.quantity*it.buyPricePerUnit,0);
     setSaving(true);
     try {
-      if (typeof window!== 'undefined' &&!navigator.onLine) {
+      if (typeof window!== 'undefined' && !navigator.onLine) {
         await addOfflinePurchase(offlineItems, supplier, invoiceNo, userId || "offline_user", "cash");
         alert(`Saved Offline Rs.${totalAmount} - will sync when online`);
         setBill([]); setInvoiceNo("");
@@ -165,15 +174,15 @@ export default function PurchasesPage() {
   return (
     <div className="min-h-screen bg-gray-50 md:bg-gray-100">
       <div className="w-full max-w-5xl mx-auto p-2 md:p-6 pb-28">
-        <h1 className="text-[12px] md:text-xl font-bold mb-2 md:mb-4">📦 New Purchase — Yasir Medical {typeof window!=='undefined' &&!navigator.onLine && <span className="ml-2 text-[9px] bg-red-100 text-red-600 px-2 py-0.5 rounded-full">OFFLINE</span>}</h1>
+        <h1 className="text-[12px] md:text-xl font-bold mb-2 md:mb-4">📦 New Purchase — Yasir Medical V16 BATCH {typeof window!=='undefined' &&!navigator.onLine && <span className="ml-2 text-[9px] bg-red-100 text-red-600 px-2 py-0.5 rounded-full">OFFLINE</span>}</h1>
 
         <div className="bg-white border rounded-xl p-2 md:p-4 mb-2 md:mb-4 flex gap-2">
-          <input value={supplier} onChange={e=>setSupplier(e.target.value)} placeholder="Supplier" className="flex-1 border rounded-lg px-2 md:px-4 py-1 text-[11px] md:text-[15px] h-8 md:h-11 outline-none focus:border-green-600 focus:ring-1 focus:ring-green-600" />
+          <input value={supplier} onChange={e=>setSupplier(e.target.value)} placeholder="Supplier" className="flex-1 border rounded-lg px-2 md:px-4 py-1 text-[11px] md:text-[15px] h-8 md:h-11 outline-none focus:border-green-600" />
           <input value={invoiceNo} onChange={e=>setInvoiceNo(e.target.value)} placeholder="#Inv No" className="w-24 md:w-36 border rounded-lg px-2 md:px-4 py-1 text-[11px] md:text-[15px] h-8 md:h-11 outline-none focus:border-green-600" />
         </div>
 
         <div className="relative bg-white border rounded-xl p-2 md:p-4 mb-2 md:mb-4">
-          <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="🔍 Search medicine e.g. panadol" className="w-full border rounded-lg px-2 md:px-4 py-1 text-[11px] md:text-[15px] h-8 md:h-12 outline-none focus:border-green-600 focus:ring-1 focus:ring-green-600" />
+          <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="🔍 Search medicine e.g. panadol" className="w-full border rounded-lg px-2 md:px-4 py-1 text-[11px] md:text-[15px] h-8 md:h-12 outline-none focus:border-green-600" />
           {loading && <p className="text-[10px] md:text-sm text-gray-400 mt-2">Searching...</p>}
           {products.length>0 && (
             <div className="absolute left-2 right-2 md:left-4 md:right-4 top-11 md:top-15 bg-white border shadow-xl rounded-xl z-20 max-h-72 overflow-auto">
@@ -182,17 +191,11 @@ export default function PurchasesPage() {
                 return (
                   <button key={p._id} onClick={()=>addToBill(p)} className="w-full text-left p-2 md:p-3 border-b hover:bg-green-50 flex justify-between items-center">
                     <span className="text-[11px] md:text-[14px] font-bold">{p.name} <span className="font-normal text-gray-400 text-[9px] md:text-xs ml-1">{p.company}</span></span>
-                    <span className="text-[8px] md:text-xs bg-gray-100 px-2 py-1 rounded-full">Stk {p.stock} {p.mainUnit} • Buy Rs.{p.buyPrice} • Sell Rs.{displaySell} ({p.mainUnit})</span>
+                    <span className="text-[8px] md:text-xs bg-gray-100 px-2 py-1 rounded-full">Stk {p.stock} {p.mainUnit} • Buy Rs.{p.buyPriceAvg || p.buyPrice} • Sell Rs.{displaySell}</span>
                   </button>
                 );
               })}
               <button onClick={addCustom} className="w-full p-2 md:p-3 text-[11px] md:text-sm text-blue-600 bg-blue-50 font-bold">+ Add as new: {search}</button>
-            </div>
-          )}
-          {search.length>=2 && products.length===0 &&!loading && (
-            <div className="mt-2 flex gap-2 items-center">
-              <p className="text-[10px] md:text-sm text-gray-400">Not found</p>
-              <button onClick={addCustom} className="bg-blue-600 text-white px-3 py-1 rounded-full text-[10px] md:text-xs">+ Add {search}</button>
             </div>
           )}
         </div>
@@ -201,27 +204,32 @@ export default function PurchasesPage() {
           {bill.length===0? <p className="p-6 md:p-10 text-center text-[11px] md:text-sm text-gray-400">No items — search and add medicine</p> :
             bill.map((it, idx)=>(
               <div key={idx} className="p-2 md:p-4 border-b hover:bg-gray-50/50">
-                <div className="flex justify-between items-center mb-1 md:mb-2">
-                  <p className="font-bold text-[11px] md:text-[15px] truncate pr-2">{it.name} {it.company? `(${it.company})`:""} {!it.productId && <span className="ml-1 text-[8px] md:text-[10px] bg-yellow-100 text-yellow-700 px-1.5 py-0.5 rounded">NEW</span>} <span className="text-[9px] font-normal text-gray-500">[{it.mainUnit} x {it.pattaPerBox} patta]</span></p>
-                  <button onClick={()=>setBill(prev=>prev.filter((_,i)=>i!==idx))} className="text-[9px] md:text-xs bg-red-50 text-red-600 px-2 md:px-3 py-0.5 md:py-1 rounded-full hover:bg-red-100">Del</button>
+                <div className="flex justify-between items-center mb-2">
+                  <p className="font-bold text-[11px] md:text-[15px] truncate pr-2">{it.name} {it.company? `(${it.company})`:""} {!it.productId && <span className="ml-1 text-[8px] bg-yellow-100 text-yellow-700 px-1.5 py-0.5 rounded">NEW</span>}</p>
+                  <button onClick={()=>setBill(prev=>prev.filter((_,i)=>i!==idx))} className="text-[9px] md:text-xs bg-red-50 text-red-600 px-2 md:px-3 py-0.5 rounded-full">Del</button>
                 </div>
-                <div className="grid grid-cols-4 md:grid-cols-[120px_1fr_1fr_110px] gap-1 md:gap-4 items-end">
+                <div className="grid grid-cols-2 md:grid-cols-6 gap-2 items-end">
                   <div>
-                    <label className="text-[8px] md:text-[11px] text-gray-500 block mb-0.5">Qty ({it.mainUnit})</label>
-                    <input type="text" inputMode="numeric" value={it.quantity===0?"":it.quantity} placeholder="1" onFocus={e=>e.target.select()} onChange={e=>updateQty(idx,e.target.value)} className="w-full border rounded-lg px-2 md:px-3 py-1 text-[11px] md:text-[15px] h-7 md:h-11 text-center md:text-left outline-none focus:border-green-600" />
-                  </div>
-                  <div>
-                    <label className="text-[8px] md:text-[11px] text-blue-600 font-bold block mb-0.5">Buy Price (per {it.mainUnit})</label>
-                    <input type="text" inputMode="decimal" value={it.buyPricePerUnit===0?"":it.buyPricePerUnit} placeholder="0" onFocus={e=>e.target.select()} onChange={e=>updatePrice(idx,"buyPricePerUnit",e.target.value)} className="w-full border rounded-lg px-2 md:px-3 py-1 text-[11px] md:text-[15px] h-7 md:h-11 bg-blue-50/40 outline-none focus:border-blue-500" />
+                    <label className="text-[8px] md:text-[11px] text-gray-500 block">Qty ({it.mainUnit})</label>
+                    <input type="text" inputMode="numeric" value={it.quantity===0?"":it.quantity} onFocus={e=>e.target.select()} onChange={e=>updateField(idx,"quantity",e.target.value)} className="w-full border rounded-lg px-2 py-1 text-[11px] h-8 text-center outline-none focus:border-green-600" />
                   </div>
                   <div>
-                    <label className="text-[8px] md:text-[11px] text-green-600 font-bold block mb-0.5">Sell Price (per {it.mainUnit})</label>
-                    <input type="text" inputMode="decimal" value={it.sellPricePerUnit===0?"":it.sellPricePerUnit} placeholder="0" onFocus={e=>e.target.select()} onChange={e=>updatePrice(idx,"sellPricePerUnit",e.target.value)} className="w-full border rounded-lg px-2 md:px-3 py-1 text-[11px] md:text-[15px] h-7 md:h-11 bg-green-50/40 outline-none focus:border-green-600" />
+                    <label className="text-[8px] text-blue-600 font-bold block">Buy/box</label>
+                    <input type="text" inputMode="decimal" value={it.buyPricePerUnit===0?"":it.buyPricePerUnit} onFocus={e=>e.target.select()} onChange={e=>updateField(idx,"buyPricePerUnit",e.target.value)} className="w-full border rounded-lg px-2 py-1 text-[11px] h-8 bg-blue-50/40 outline-none" />
                   </div>
-                  <div className="text-[10px] md:text-[14px] font-bold h-7 md:h-11 flex flex-col items-center justify-center bg-gray-100 md:bg-gray-50 rounded-lg leading-tight">
-                    <span>Rs.{it.quantity*it.buyPricePerUnit}</span>
-                    <span className="text-[8px] font-normal text-gray-500">{it.mainUnit==="box" ? `= Rs.${(it.sellPricePerUnit / it.pattaPerBox).toFixed(1)}/patta` : ""}</span>
+                  <div>
+                    <label className="text-[8px] text-green-600 font-bold block">Sell/box</label>
+                    <input type="text" inputMode="decimal" value={it.sellPricePerUnit===0?"":it.sellPricePerUnit} onFocus={e=>e.target.select()} onChange={e=>updateField(idx,"sellPricePerUnit",e.target.value)} className="w-full border rounded-lg px-2 py-1 text-[11px] h-8 bg-green-50/40 outline-none" />
                   </div>
+                  <div>
+                    <label className="text-[8px] text-amber-700 font-bold block">Batch No *</label>
+                    <input value={it.batchNo} onChange={e=>updateField(idx,"batchNo",e.target.value)} placeholder="B123" className="w-full border-2 border-amber-200 rounded-lg px-2 py-1 text-[11px] h-8 outline-none focus:border-amber-400" />
+                  </div>
+                  <div>
+                    <label className="text-[8px] text-amber-700 font-bold block">Expiry *</label>
+                    <input type="date" value={it.expiryDate} onChange={e=>updateField(idx,"expiryDate",e.target.value)} className="w-full border-2 border-amber-200 rounded-lg px-2 py-1 text-[11px] h-8 outline-none" />
+                  </div>
+                  <div className="text-[10px] font-bold h-8 flex items-center justify-center bg-gray-100 rounded-lg">Rs.{it.quantity*it.buyPricePerUnit}</div>
                 </div>
               </div>
             ))
@@ -230,10 +238,10 @@ export default function PurchasesPage() {
 
         <div className="bg-green-600 text-white rounded-xl p-3 md:p-4 flex justify-between items-center fixed md:sticky bottom-2 md:bottom-0 left-2 right-2 md:left-auto md:right-auto md:mt-4 shadow-xl z-30 max-w-5xl mx-auto">
           <div>
-            <p className="text-[10px] md:text-xs opacity-80">{bill.length} items • Total Kharidari</p>
-            <p className="text-[15px] md:text-xl font-bold">Rs.{totalBuy}</p>
+            <p className="text-[10px] opacity-80">{bill.length} items • Total Kharidari</p>
+            <p className="text-[15px] font-bold">Rs.{totalBuy}</p>
           </div>
-          <button onClick={saveBill} disabled={saving||!bill.length} className="bg-white text-green-700 px-5 md:px-8 py-2 md:py-3 rounded-full text-[11px] md:text-sm font-bold disabled:opacity-50 hover:bg-gray-50 active:scale-95 transition">{saving?"Saving...":"Save Bill"}</button>
+          <button onClick={saveBill} disabled={saving||!bill.length} className="bg-white text-green-700 px-5 md:px-8 py-2 rounded-full text-[11px] font-bold disabled:opacity-50">{saving?"Saving...":"Save Bill"}</button>
         </div>
       </div>
     </div>

@@ -113,9 +113,10 @@ export default function SalesHistoryPage() {
 
   useEffect(() => {
     const controller = new AbortController();
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    void loadData(filter, search, page, statusFilter, controller.signal);
-    return () => controller.abort();
+    const t = setTimeout(() => {
+      void loadData(filter, search, page, statusFilter, controller.signal);
+    }, 0);
+    return () => { clearTimeout(t); controller.abort(); };
   }, [filter, search, page, statusFilter, loadData]);
 
   const grouped: Record<string, Sale[]> = {};
