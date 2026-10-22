@@ -4,35 +4,49 @@ import Batch from "@/models/Batch";
 import { NextRequest, NextResponse } from "next/server";
 import { getServerSession } from "next-auth";
 import { authOptions } from "../auth/[...nextauth]/route";
-import { Types, startSession } from "mongoose";
+import { Types, startSession, HydratedDocument } from "mongoose";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
 type MainUnit = "box" | "bottle" | "tube" | "piece";
-
 type ProductBody = {
-  name: string; 
-  company?: string; 
-  generic?: string; 
-  batchNo?: string;
-  expiryDate?: string;
-  barcode?: string; 
-  rack?: string;
-  mainUnit: MainUnit;
-  pattaPerBox?: number; 
-  mlPerBottle?: number;
-  buyPrice: number;
-  sellPrice: number;
-  stock?: number; 
-  localId?: string;
-  unit?: string;
+  name: string; company?: string; generic?: string; batchNo?: string;
+  expiryDate?: string; barcode?: string; rack?: string;
+  mainUnit: MainUnit; pattaPerBox?: number; mlPerBottle?: number;
+  buyPrice: number; sellPrice: number; stock?: number; localId?: string; unit?: string;
 };
-
 type SearchCondition = { $regex: string; $options: string };
 type ProductSearchQuery = {
   userId: Types.ObjectId;
   $or?: { name?: SearchCondition; company?: SearchCondition; generic?: SearchCondition }[];
+};
+
+// Extend model type to include legacy fields used for sale card
+type ProductLean = {
+  _id: Types.ObjectId;
+  name: string;
+  company?: string;
+  stock: number;
+  mainUnit: MainUnit;
+  sellPrice: number;
+  buyPriceAvg?: number;
+  pattaPerBox?: number;
+  mlPerBottle?: number;
+  expiryDate?: Date;
+  batchNo?: string;
+  nearestExpiry?: Date | null;
+  createdAt?: Date;
+};
+
+type BatchLean = {
+  _id: Types.ObjectId;
+  productId: Types.ObjectId;
+  batchNo: string;
+  expiryDate: Date;
+  buyPrice: number;
+  quantity: number;
+  userId: Types.ObjectId;
 };
 
 function mapLegacyUnit(u: string): MainUnit {
@@ -61,17 +75,18 @@ export async function GET(req: NextRequest) {
     }
     
     const [products, totalCount] = await Promise.all([
-      Product.find(baseQuery).sort({ createdAt: -1 }).skip(skip).limit(limit).lean(),
+      Product.find(baseQuery).sort({ createdAt: -1 }).skip(skip).limit(limit).lean<ProductLean[]>(),
       Product.countDocuments(baseQuery),
     ]);
 
-    const productIds = products.map(p => p._id);
+    const productIds = products.map((p) => p._id);
     const batches = await Batch.find({ 
       productId: { $in: productIds }, 
+      userId: userObjectId,
       quantity: { $gt: 0 } 
-    }).sort({ expiryDate: 1 }).lean();
+    }).sort({ expiryDate: 1 }).lean<BatchLean[]>();
     
-    const batchesByProduct = new Map<string, typeof batches>();
+    const batchesByProduct = new Map<string, BatchLean[]>();
     for (const b of batches) {
       const pid = String(b.productId);
       const list = batchesByProduct.get(pid);
@@ -79,11 +94,18 @@ export async function GET(req: NextRequest) {
       else batchesByProduct.set(pid, [b]);
     }
 
-    const productsWithBatches = products.map(p => ({
-      ...p,
-      batches: batchesByProduct.get(String(p._id)) ?? [],
-      nearestExpiry: batchesByProduct.get(String(p._id))?.[0]?.expiryDate ?? null
-    }));
+    const productsWithBatches = products.map((p) => {
+      const bList = batchesByProduct.get(String(p._id)) ?? [];
+      const sumQty = bList.reduce((s, b) => s + b.quantity, 0);
+      return {
+        ...p,
+        stock: bList.length ? Math.round(sumQty*1000)/1000 : p.stock,
+        batches: bList,
+        nearestExpiry: bList[0]?.expiryDate ?? p.nearestExpiry ?? null,
+        expiryDate: bList[0]?.expiryDate ?? p.expiryDate,
+        batchNo: bList[0]?.batchNo ?? p.batchNo,
+      };
+    });
 
     if (searchParams.has("page") || searchParams.has("search") || searchParams.has("limit")) {
       return NextResponse.json({ 
@@ -121,46 +143,45 @@ export async function POST(req: NextRequest) {
     const userObjectId = new Types.ObjectId(session.user.id);
     
     if (body.localId) {
-      const existing = await Product.findOne({ localId: body.localId, userId: userObjectId }).lean();
+      const existing = await Product.findOne({ localId: body.localId, userId: userObjectId }).lean<ProductLean>();
       if (existing) return NextResponse.json(existing, { status: 200 });
     }
 
     const mongoSession = await startSession();
     let createdProductId: Types.ObjectId | null = null;
+    
     try {
       await mongoSession.withTransaction(async () => {
-        const created = await Product.create([{
+        // Use new + save to avoid overload issue with create([doc], {session})
+        const productDoc = new Product({
           name: body.name.trim(),
           company: body.company?.trim() || "Unknown",
           generic: body.generic?.trim() || "",
           barcode: body.barcode?.trim() || undefined,
           rack: body.rack?.trim() || "",
-          mainUnit,
-          pattaPerBox: ppb,
-          mlPerBottle: mlB,
-          sellPrice: sell,
-          buyPriceAvg: buy,
+          mainUnit, pattaPerBox: ppb, mlPerBottle: mlB,
+          sellPrice: sell, buyPriceAvg: buy,
           stock,
+          expiryDate: stock > 0 ? new Date(body.expiryDate!) : undefined,
+          batchNo: stock > 0 ? String(body.batchNo).trim() : undefined,
           nearestExpiry: stock > 0 ? new Date(body.expiryDate!) : undefined,
-          userId: userObjectId,
-          localId: body.localId || undefined,
-          synced: true,
-          lastSyncedAt: new Date(),
-        }], { session: mongoSession });
+          userId: userObjectId, localId: body.localId || undefined,
+          synced: true, lastSyncedAt: new Date(),
+        }) as HydratedDocument<ProductLean>;
 
-        const prod = created[0];
-        createdProductId = prod._id as Types.ObjectId;
+        const saved = await productDoc.save({ session: mongoSession });
+        createdProductId = saved._id as Types.ObjectId;
 
         if (stock > 0) {
-          await Batch.create([{
-            productId: prod._id,
-            batchNo: body.batchNo!.trim(),
+          const batchDoc = new Batch({
+            productId: saved._id,
+            batchNo: String(body.batchNo).trim(),
             expiryDate: new Date(body.expiryDate!),
-            buyPrice: buy,
-            quantity: stock,
+            buyPrice: buy, quantity: stock,
             userId: userObjectId,
-            localId: body.localId ? `batch_${body.localId}` : undefined,
-          }], { session: mongoSession });
+            localId: body.localId ? `batch_${body.localId}` : `batch_${Date.now()}_${Math.random().toString(36).slice(2,7)}`,
+          });
+          await batchDoc.save({ session: mongoSession });
         }
       });
     } finally {
@@ -171,7 +192,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "Failed to create product - transaction failed" }, { status: 500 });
     }
 
-    const productWithBatch = await Product.findById(createdProductId).lean();
+    const productWithBatch = await Product.findById(createdProductId).lean<ProductLean>();
     return NextResponse.json(productWithBatch, { status: 201 });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed to create product";

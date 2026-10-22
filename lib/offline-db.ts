@@ -120,7 +120,7 @@ export class OfflineDB extends Dexie {
 
   constructor() {
     super('YasirMedicalOfflineV16');
-    this.version(17).stores({
+    this.version(18).stores({
       products: 'localId, _id, userId, synced, name, mainUnit',
       batches: 'localId, _id, productId, userId, synced, expiryDate, batchNo, quantity',
       sales: 'localId, productId, batchId, userId, synced, createdAt, customerName, status',
@@ -150,10 +150,19 @@ export async function getExpiringBatches(userId: string, days = 90) {
   const limitDate = new Date();
   limitDate.setDate(limitDate.getDate() + days);
   const limitISO = limitDate.toISOString();
-  return await offlineDB.batches
+  const all = await offlineDB.batches
     .where('userId').equals(userId)
-    .filter(b => b.expiryDate <= limitISO && b.quantity > 0)
+    .filter(b => b.expiryDate <= limitISO && b.quantity > 0.0001)
     .sortBy('expiryDate');
+  
+  const map = new Map<string, OfflineBatch>();
+  for (const b of all) {
+    const key = `${b.productId}_${b.batchNo.trim().toLowerCase()}_${b.expiryDate.slice(0,10)}`;
+    const prev = map.get(key);
+    if (!prev) map.set(key, b);
+    else map.set(key, { ...prev, quantity: Math.round((prev.quantity + b.quantity)*1000)/1000 });
+  }
+  return Array.from(map.values());
 }
 
 export async function addOfflinePurchase(
@@ -167,59 +176,60 @@ export async function addOfflinePurchase(
   const localId = `pur_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
   
   const purchase: OfflinePurchase = {
-    localId,
-    supplier,
-    invoiceNo,
-    totalBuyAmount,
-    totalItems: items.length,
-    items: items.map(it => ({ ...it, totalBuy: it.quantity * it.buyPricePerUnit })),
-    paymentType,
-    userId,
-    createdAt: new Date().toISOString(),
-    synced: 0,
+    localId, supplier, invoiceNo, totalBuyAmount, totalItems: items.length,
+    items: items.map(it => ({ ...it, batchNo: String(it.batchNo).trim(), totalBuy: it.quantity * it.buyPricePerUnit })),
+    paymentType, userId, createdAt: new Date().toISOString(), synced: 0,
   };
   
   await offlineDB.transaction('rw', offlineDB.purchases, offlineDB.batches, offlineDB.products, offlineDB.syncQueue, async () => {
     await offlineDB.purchases.add(purchase);
-    for (let i = 0; i < items.length; i++) {
-      const item = items[i];
-      const batchLocalId = `batch_${Date.now()}_${i}_${Math.random().toString(36).slice(2, 7)}`;
-      const batch: OfflineBatch = {
-        localId: batchLocalId,
-        productId: item.productId,
-        batchNo: item.batchNo,
-        expiryDate: item.expiryDate,
-        buyPrice: item.buyPricePerUnit,
-        quantity: item.quantity,
-        userId,
-        synced: 0,
-        createdAt: new Date().toISOString()
-      };
-      await offlineDB.batches.add(batch);
-      await offlineDB.syncQueue.add({
-        type: 'batch',
-        localId: batchLocalId,
-        payload: batch,
-        createdAt: new Date(),
-        attempts: 0
-      });
+
+    const agg = new Map<string, OfflinePurchaseItem>();
+    for(const it of items){
+      const key = `${it.productId}_${String(it.batchNo).trim().toLowerCase()}`;
+      const prev = agg.get(key);
+      if(prev) agg.set(key, { ...prev, quantity: prev.quantity + it.quantity });
+      else agg.set(key, { ...it, batchNo: String(it.batchNo).trim() });
+    }
+
+    for (const item of agg.values()) {
+      const trimmed = String(item.batchNo).trim();
+      const lower = trimmed.toLowerCase();
+      
+      const allForProduct = await offlineDB.batches.where('productId').equals(item.productId).toArray();
+      const existing = allForProduct.find(b => b.batchNo.trim().toLowerCase() === lower && b.userId === userId);
+
+      if (existing) {
+        const newQty = Math.round((existing.quantity + item.quantity) * 1000) / 1000;
+        await offlineDB.batches.update(existing.localId, { 
+          quantity: newQty,
+          expiryDate: item.expiryDate,
+          buyPrice: item.buyPricePerUnit,
+          synced: 0
+        });
+      } else {
+        const batchLocalId = `batch_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+        const batch: OfflineBatch = {
+          localId: batchLocalId,
+          productId: item.productId,
+          batchNo: trimmed,
+          expiryDate: item.expiryDate,
+          buyPrice: item.buyPricePerUnit,
+          quantity: Math.round(item.quantity*1000)/1000,
+          userId, synced: 0, createdAt: new Date().toISOString()
+        };
+        await offlineDB.batches.add(batch);
+      }
+
       const prod = await offlineDB.products.where('_id').equals(item.productId).or('localId').equals(item.productId).first();
       if (prod) {
-        const newStock = (prod.stock || 0) + item.quantity;
-        const newAvg = prod.buyPriceAvg ? ((prod.buyPriceAvg * (prod.stock || 0)) + (item.buyPricePerUnit * item.quantity)) / newStock : item.buyPricePerUnit;
-        await offlineDB.products.update(prod.localId, {
-          stock: newStock,
-          buyPriceAvg: newAvg
-        });
+        const currentStock = prod.stock || 0;
+        const newStockForAvg = currentStock + item.quantity;
+        const newAvg = prod.buyPriceAvg ? ((prod.buyPriceAvg * currentStock) + (item.buyPricePerUnit * item.quantity)) / newStockForAvg : item.buyPricePerUnit;
+        await offlineDB.products.update(prod.localId, { buyPriceAvg: Math.round(newAvg*100)/100, synced: 0 });
       }
     }
-    await offlineDB.syncQueue.add({
-      type: 'purchase',
-      localId,
-      payload: purchase,
-      createdAt: new Date(),
-      attempts: 0,
-    });
+    await offlineDB.syncQueue.add({ type: 'purchase', localId, payload: purchase, createdAt: new Date(), attempts: 0 });
   });
   return localId;
 }
@@ -237,6 +247,7 @@ export async function upsertOfflineCustomer(sale: OfflineSale, village = "", pho
       saleIds: [...(existing.saleIds || []), sale.localId],
       billsCount: (existing.billsCount || 1) + 1,
       lastUdharDate: new Date().toISOString(),
+      synced: 0
     });
     return existing.localId;
   } else {
@@ -258,9 +269,9 @@ export async function addOfflineWusool(customerLocalId: string, amount: number, 
   const newUdhar = Math.round((customer.totalUdhar || 0) - paid);
   const entry = { amount: paid, date: new Date().toISOString(), note };
   if (newUdhar <= 0) {
-    await offlineDB.customers.update(customerLocalId, { totalUdhar: 0, isPaid: true, paidAmount: customer.totalBusiness, wusoolHistory: [...(customer.wusoolHistory || []), entry], synced: 0 });
+    await offlineDB.customers.update(customerLocalId, { totalUdhar: 0, isPaid: true, paidAmount: customer.totalBusiness, lastWusoolDate: entry.date, wusoolHistory: [...(customer.wusoolHistory || []), entry], synced: 0 });
   } else {
-    await offlineDB.customers.update(customerLocalId, { totalUdhar: newUdhar, paidAmount: (customer.paidAmount || 0) + paid, wusoolHistory: [...(customer.wusoolHistory || []), entry], synced: 0 });
+    await offlineDB.customers.update(customerLocalId, { totalUdhar: newUdhar, paidAmount: (customer.paidAmount || 0) + paid, lastWusoolDate: entry.date, wusoolHistory: [...(customer.wusoolHistory || []), entry], synced: 0 });
   }
   await offlineDB.syncQueue.add({ type: 'wusool', localId: customerLocalId, payload: { amount: paid, note, date: entry.date }, createdAt: new Date(), attempts: 0 });
   return entry;

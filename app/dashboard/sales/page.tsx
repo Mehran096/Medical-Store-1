@@ -228,7 +228,7 @@ export default function SalesPage() {
             }
             const deduped = Array.from(uniqueMap.values());
             setExpiryProducts(deduped.map((b)=>({
-              _id: b._id || b.productId, name: b.productName || b.batchNo, company: b.company,
+              _id: b._id || `${b.productId}_${b.batchNo}`, name: b.productName || b.batchNo, company: b.company,
               mainUnit: b.mainUnit as MainUnit || "box", pattaPerBox: 10, mlPerBottle: 120,
               buyPrice: b.buyPrice, buyPriceAvg: b.buyPrice, sellPrice: b.sellPrice || 0,
               stock: b.quantity, expiryDate: b.expiryDate, batchNo: b.batchNo

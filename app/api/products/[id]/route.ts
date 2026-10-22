@@ -14,13 +14,25 @@ type MainUnit = "box" | "bottle" | "tube" | "piece";
 
 type ProductBody = {
   name?: string; company?: string; generic?: string; 
-  batchNo?: string;
-  expiryDate?: string;
+  batchNo?: string; expiryDate?: string;
   barcode?: string; rack?: string;
-  mainUnit?: MainUnit;
-  pattaPerBox?: number; mlPerBottle?: number;
-  buyPrice?: number; sellPrice?: number;
-  stock?: number;
+  mainUnit?: MainUnit; pattaPerBox?: number; mlPerBottle?: number;
+  buyPrice?: number; sellPrice?: number; stock?: number;
+};
+
+type ProductLean = {
+  _id: Types.ObjectId;
+  stock: number;
+  expiryDate?: Date;
+  batchNo?: string;
+  nearestExpiry?: Date | null;
+};
+
+type BatchLean = {
+  _id: Types.ObjectId;
+  batchNo: string;
+  expiryDate: Date;
+  quantity: number;
 };
 
 function isValidObjectId(id: string): boolean { 
@@ -34,18 +46,12 @@ export async function GET(_req: NextRequest, { params }: Params) {
     const session = await getServerSession(authOptions);
     if (!session?.user?.id) return NextResponse.json({ message: "Unauthorized" }, { status: 401 });
     await dbConnect();
+    const userId = new Types.ObjectId(session.user.id);
     
-    const product = await Product.findOne({ 
-      _id: id, 
-      userId: new Types.ObjectId(session.user.id) 
-    }).lean();
-    
+    const product = await Product.findOne({ _id: id, userId }).lean<ProductLean & Record<string, unknown>>();
     if (!product) return NextResponse.json({ message: "Product not found" }, { status: 404 });
     
-    const batches = await Batch.find({ 
-      productId: product._id, 
-      quantity: { $gt: 0 } 
-    }).sort({ expiryDate: 1 }).lean();
+    const batches = await Batch.find({ productId: product._id, userId, quantity: { $gt: 0 } }).sort({ expiryDate: 1 }).lean<BatchLean[]>();
     
     return NextResponse.json({ ...product, batches });
   } catch { 
@@ -60,11 +66,11 @@ export async function PUT(req: NextRequest, { params }: Params) {
     const session = await getServerSession(authOptions);
     if (!session?.user?.id) return NextResponse.json({ message: "Unauthorized" }, { status: 401 });
     await dbConnect();
+    const userId = new Types.ObjectId(session.user.id);
     const body = (await req.json()) as ProductBody;
 
     const updateData: Record<string, string | number | Date | boolean> = { 
-      lastSyncedAt: new Date(), 
-      synced: true 
+      lastSyncedAt: new Date(), synced: true 
     };
 
     if (body.name) updateData.name = body.name.trim();
@@ -72,44 +78,59 @@ export async function PUT(req: NextRequest, { params }: Params) {
     if (body.generic !== undefined) updateData.generic = body.generic.trim();
     if (body.barcode !== undefined) updateData.barcode = body.barcode.trim();
     if (body.rack !== undefined) updateData.rack = body.rack.trim();
-    
     if (body.mainUnit) updateData.mainUnit = body.mainUnit;
     if (body.pattaPerBox !== undefined) updateData.pattaPerBox = Number(body.pattaPerBox);
     if (body.mlPerBottle !== undefined) updateData.mlPerBottle = Number(body.mlPerBottle);
     if (body.sellPrice !== undefined) updateData.sellPrice = Number(body.sellPrice);
     if (body.buyPrice !== undefined) updateData.buyPriceAvg = Number(body.buyPrice);
-    // FIXED: don't allow direct stock edit in batch system - stock is sum of batches
-    // if (body.stock !== undefined) updateData.stock = Number(body.stock);
 
     const updated = await Product.findOneAndUpdate(
-      { _id: id, userId: new Types.ObjectId(session.user.id) },
+      { _id: id, userId },
       updateData,
       { new: true, runValidators: true }
-    ).lean();
+    ).lean<ProductLean & Record<string, unknown>>();
 
     if (!updated) return NextResponse.json({ message: "Product not found" }, { status: 404 });
 
+    // FIXED: add userId filter + edit by batchNo if provided, else earliest batch
     if (body.batchNo || body.expiryDate || body.buyPrice !== undefined) {
-      const latestBatch = await Batch.findOne({ 
-        productId: updated._id 
-      }).sort({ createdAt: -1 });
+      let targetBatch = null;
+      if (body.batchNo) {
+        const trimmed = String(body.batchNo).trim();
+        targetBatch = await Batch.findOne({ 
+          productId: updated._id, userId,
+          batchNo: { $regex: `^${trimmed.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, $options: 'i' }
+        });
+      }
+      if (!targetBatch) {
+        targetBatch = await Batch.findOne({ productId: updated._id, userId }).sort({ expiryDate: 1 });
+      }
       
-      if (latestBatch) {
-        if (body.batchNo) latestBatch.batchNo = body.batchNo.trim();
-        if (body.expiryDate) latestBatch.expiryDate = new Date(body.expiryDate);
-        if (body.buyPrice !== undefined) latestBatch.buyPrice = Number(body.buyPrice);
-        await latestBatch.save();
-
-        // FIXED: recalc nearestExpiry after edit
-        const firstBatch = await Batch.findOne({ productId: updated._id, quantity: { $gt: 0 } }).sort({ expiryDate: 1 });
-        if (firstBatch) {
-          await Product.updateOne({ _id: updated._id }, { nearestExpiry: firstBatch.expiryDate });
-        }
+      if (targetBatch) {
+        if (body.batchNo) targetBatch.batchNo = String(body.batchNo).trim();
+        if (body.expiryDate) targetBatch.expiryDate = new Date(body.expiryDate);
+        if (body.buyPrice !== undefined) targetBatch.buyPrice = Number(body.buyPrice);
+        await targetBatch.save();
       }
     }
 
-    const batches = await Batch.find({ productId: updated._id }).sort({ expiryDate: 1 }).lean();
-    return NextResponse.json({ ...updated, batches });
+    // FIXED: recalc stock = sum batches + expiry fields for sale card + 🔔
+    const allBatches = await Batch.find({ productId: updated._id, userId, quantity: { $gt: 0 } }).sort({ expiryDate: 1 }).lean<BatchLean[]>();
+    const sumQty = allBatches.reduce((s, b) => s + b.quantity, 0);
+    const earliest = allBatches[0];
+
+    if (earliest) {
+      await Product.updateOne({ _id: updated._id }, { 
+        stock: Math.round(sumQty*1000)/1000,
+        nearestExpiry: earliest.expiryDate,
+        expiryDate: earliest.expiryDate,
+        batchNo: earliest.batchNo,
+      });
+    }
+
+    const batches = await Batch.find({ productId: updated._id, userId }).sort({ expiryDate: 1 }).lean<BatchLean[]>();
+    const refreshed = await Product.findById(updated._id).lean();
+    return NextResponse.json({ ...refreshed, batches });
   } catch (error) {
     console.error("PUT error:", error);
     return NextResponse.json({ message: "Failed to update" }, { status: 400 });

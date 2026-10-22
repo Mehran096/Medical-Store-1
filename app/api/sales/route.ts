@@ -16,55 +16,30 @@ type MainUnit = "box" | "bottle" | "tube" | "piece";
 type SellUnit = "patta" | "half_patta" | "box" | "bottle" | "ml" | "tube" | "piece";
 
 type SaleBody = {
-  productId: string; 
-  quantity: number;
-  sellUnit?: SellUnit; 
-  mainUnit?: MainUnit;
-  sellPrice?: number;
-  pattaPerBox?: number; 
-  mlPerBottle?: number;
-  soldBy?: string; 
-  localId?: string;
-  customerName?: string; 
-  customerPhone?: string;
-  customerVillage?: string; 
-  paymentType?: string;
-  batchId?: string;
-  batchNo?: string;
-  expiryDate?: string;
-  buyPriceMain?: number;
-  total?: number;
-  profit?: number;
-  deductionMain?: number;
-  deductionPatta?: number;
+  productId: string; quantity: number;
+  sellUnit?: SellUnit; mainUnit?: MainUnit;
+  sellPrice?: number; pattaPerBox?: number; mlPerBottle?: number;
+  soldBy?: string; localId?: string;
+  customerName?: string; customerPhone?: string; customerVillage?: string; 
+  paymentType?: string; batchId?: string; batchNo?: string;
+  expiryDate?: string; buyPriceMain?: number; total?: number;
+  profit?: number; deductionMain?: number; deductionPatta?: number;
 };
 
 type DateFilter = { $gte: Date; $lte?: Date };
 type SearchRegex = { $regex: string; $options: string };
 type SaleQuery = {
-  userId: Types.ObjectId;
-  createdAt?: DateFilter;
+  userId: Types.ObjectId; createdAt?: DateFilter;
   $or?: Array<{ productName?: SearchRegex; customerName?: SearchRegex; status?: SaleStatus; isCredit?: boolean; paymentType?: string }>;
   $and?: Array<{ $or: Array<{ productName?: SearchRegex; customerName?: SearchRegex; status?: SaleStatus; isCredit?: boolean; paymentType?: string }> }>;
 };
-
-type CustomerQuery = {
-  userId: Types.ObjectId;
-  isPaid: boolean;
-  name?: SearchRegex;
-};
-
+type CustomerQuery = { userId: Types.ObjectId; isPaid: boolean; name?: SearchRegex; };
 type CreatedSaleInfo = { _id: Types.ObjectId; total: number };
 
 function getDateRange(filter: string): { start: Date; end: Date } {
-  const now = new Date(); 
-  const start = new Date(now); 
-  const end = new Date(now);
+  const now = new Date(); const start = new Date(now); const end = new Date(now);
   if (filter === "today") start.setHours(0,0,0,0);
-  else if (filter === "yesterday") { 
-    start.setDate(now.getDate()-1); start.setHours(0,0,0,0); 
-    end.setDate(now.getDate()-1); end.setHours(23,59,59,999); 
-  }
+  else if (filter === "yesterday") { start.setDate(now.getDate()-1); start.setHours(0,0,0,0); end.setDate(now.getDate()-1); end.setHours(23,59,59,999); }
   else if (filter === "weekly") { start.setDate(now.getDate()-7); start.setHours(0,0,0,0); }
   else if (filter === "monthly") { start.setDate(1); start.setHours(0,0,0,0); }
   else if (filter === "yearly") { start.setMonth(0,1); start.setHours(0,0,0,0); }
@@ -99,9 +74,7 @@ export async function GET(req: NextRequest) {
     const { start, end } = getDateRange(filter);
 
     const saleQuery: SaleQuery = { userId: userObjectId };
-    if (filter!== "all") {
-      saleQuery.createdAt = filter === "yesterday"? { $gte: start, $lte: end } : { $gte: start };
-    }
+    if (filter!== "all") saleQuery.createdAt = filter === "yesterday"? { $gte: start, $lte: end } : { $gte: start };
     if (search) {
       const r: SearchRegex = { $regex: search, $options: "i" };
       saleQuery.$or = [{ productName: r }, { customerName: r }];
@@ -112,9 +85,7 @@ export async function GET(req: NextRequest) {
         const prevOr = saleQuery.$or;
         saleQuery.$and = [{ $or: prevOr }, { $or: pendingOr }];
         delete saleQuery.$or;
-      } else {
-        saleQuery.$or = pendingOr;
-      }
+      } else saleQuery.$or = pendingOr;
     }
 
     const totalMatch: SaleQuery = { userId: userObjectId };
@@ -169,14 +140,13 @@ export async function POST(req: NextRequest) {
     if (body.quantity < 0.001) return NextResponse.json({ error: "Quantity must be > 0" }, { status: 400 });
     
     const userObjectId = new Types.ObjectId(session.user.id);
+    if (!Types.ObjectId.isValid(body.productId)) return NextResponse.json({ error: "Invalid productId" }, { status: 400 });
     const productObjectId = new Types.ObjectId(body.productId);
     
     if (body.localId) {
       const existing = await Sale.findOne({ localId: body.localId, userId: userObjectId }).lean();
       if (existing) return NextResponse.json(existing, { status: 200 });
     }
-    
-    if (!Types.ObjectId.isValid(body.productId)) return NextResponse.json({ error: "Invalid productId" }, { status: 400 });
     
     const product = await Product.findOne({ _id: productObjectId, userId: userObjectId });
     if (!product) return NextResponse.json({ error: "Product not found" }, { status: 404 });
@@ -188,17 +158,30 @@ export async function POST(req: NextRequest) {
     const mlB = Number(body.mlPerBottle?? product.mlPerBottle?? 120);
     const sellPrice = Number(body.sellPrice?? product.sellPrice?? 0);
 
+    // PATH A: offline sync sends batchId (local_ or ObjectId) + deductionMain — FIXED
     if (body.batchId && body.deductionMain) {
-      const batch = await Batch.findById(body.batchId);
+      let batch = null;
+      if (Types.ObjectId.isValid(body.batchId)) {
+        batch = await Batch.findOne({ _id: new Types.ObjectId(body.batchId), userId: userObjectId });
+      } else {
+        // localId from offlineDB
+        batch = await Batch.findOne({ localId: body.batchId, userId: userObjectId });
+        if (!batch) {
+          // fallback by batchNo + product
+          batch = await Batch.findOne({ batchNo: body.batchNo, productId: productObjectId, userId: userObjectId }).sort({ expiryDate: 1 });
+        }
+      }
+      if (!batch) return NextResponse.json({ error: "Batch not found for sale" }, { status: 404 });
+      
       const sale = await Sale.create({
         productId: productObjectId,
         productName: product.name,
-        batchId: batch?._id,
-        batchNo: body.batchNo ?? batch?.batchNo,
-        expiryDate: body.expiryDate ? new Date(body.expiryDate) : batch?.expiryDate,
+        batchId: batch._id,
+        batchNo: body.batchNo ?? batch.batchNo,
+        expiryDate: body.expiryDate ? new Date(body.expiryDate) : batch.expiryDate,
         mainUnit, sellUnit, quantity,
         pattaPerBox: ppb, mlPerBottle: mlB,
-        buyPriceMain: body.buyPriceMain ?? batch?.buyPrice ?? product.buyPriceAvg,
+        buyPriceMain: body.buyPriceMain ?? batch.buyPrice ?? product.buyPriceAvg,
         sellPrice,
         total: body.total ?? Math.round(sellPrice * quantity),
         profit: body.profit ?? 0,
@@ -211,8 +194,11 @@ export async function POST(req: NextRequest) {
         status: (body.paymentType === "credit" || body.paymentType === "udhar") ? "pending" as SaleStatus : "paid" as SaleStatus,
         isCredit: body.paymentType === "credit" || body.paymentType === "udhar",
       });
-      
+
+      await Batch.updateOne({ _id: batch._id, userId: userObjectId }, { $inc: { quantity: -Number(body.deductionMain) } });
       await Product.findOneAndUpdate({ _id: productObjectId, userId: userObjectId }, { $inc: { stock: -Number(body.deductionMain) } });
+      const first = await Batch.findOne({ productId: productObjectId, userId: userObjectId, quantity: { $gt: 0 } }).sort({ expiryDate: 1 });
+      await Product.updateOne({ _id: productObjectId }, { nearestExpiry: first?.expiryDate });
       return NextResponse.json(sale, { status: 201 });
     }
 
@@ -220,6 +206,7 @@ export async function POST(req: NextRequest) {
     
     const allBatches = await Batch.find({ 
       productId: product._id, 
+      userId: userObjectId,
       quantity: { $gt: 0 } 
     }).sort({ expiryDate: 1 });
 
@@ -229,7 +216,6 @@ export async function POST(req: NextRequest) {
 
     let remaining = needMain;
     const createdSales: CreatedSaleInfo[] = [];
-    
     const isCredit = body.paymentType === "credit" || body.paymentType === "udhar";
     const customerName = body.customerName?.trim() || "Walk-in";
     const status: SaleStatus = isCredit ? "pending" : "paid";
@@ -240,28 +226,18 @@ export async function POST(req: NextRequest) {
 
     for (const batch of allBatches) {
       if (remaining <= 0) break;
-      
       const take = Math.min(batch.quantity, remaining);
-      const ratio = take / needMain;
+      const ratio = needMain > 0 ? take / needMain : 0;
       const qtyForThisBatch = quantity * ratio;
 
-      let total = 0;
-      let profit = 0;
+      let total = 0; let profit = 0;
       if (mainUnit === "box") {
         const buyPerPatta = batch.buyPrice / ppb;
-        if (sellUnit === "patta") {
-          total = sellPrice * qtyForThisBatch;
-          profit = (sellPrice - buyPerPatta) * qtyForThisBatch;
-        } else if (sellUnit === "half_patta") {
-          total = sellPrice * qtyForThisBatch;
-          profit = (sellPrice - buyPerPatta/2) * qtyForThisBatch;
-        } else {
-          total = sellPrice * qtyForThisBatch;
-          profit = (sellPrice - batch.buyPrice) * qtyForThisBatch;
-        }
+        if (sellUnit === "patta") { total = sellPrice * qtyForThisBatch; profit = (sellPrice - buyPerPatta) * qtyForThisBatch; }
+        else if (sellUnit === "half_patta") { total = sellPrice * qtyForThisBatch; profit = (sellPrice - buyPerPatta/2) * qtyForThisBatch; }
+        else { total = sellPrice * qtyForThisBatch; profit = (sellPrice - batch.buyPrice) * qtyForThisBatch; }
       } else {
-        total = sellPrice * qtyForThisBatch;
-        profit = (sellPrice - batch.buyPrice) * qtyForThisBatch;
+        total = sellPrice * qtyForThisBatch; profit = (sellPrice - batch.buyPrice) * qtyForThisBatch;
       }
 
       const saleDoc = await Sale.create({
@@ -270,11 +246,9 @@ export async function POST(req: NextRequest) {
         batchId: batch._id,
         batchNo: batch.batchNo,
         expiryDate: batch.expiryDate,
-        mainUnit,
-        sellUnit,
+        mainUnit, sellUnit,
         quantity: Math.round(qtyForThisBatch * 1000) / 1000,
-        pattaPerBox: ppb,
-        mlPerBottle: mlB,
+        pattaPerBox: ppb, mlPerBottle: mlB,
         buyPriceMain: batch.buyPrice,
         sellPrice,
         total: Math.round(total),
@@ -285,16 +259,18 @@ export async function POST(req: NextRequest) {
         localId: body.localId ? `${body.localId}_${createdSales.length}` : `online_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`,
         customerName,
         paymentType: isCredit ? "credit" : (body.paymentType ?? "cash"),
-        status,
-        isCredit,
+        status, isCredit,
       });
 
-      await Batch.updateOne({ _id: batch._id }, { $inc: { quantity: -take } });
+      await Batch.updateOne({ _id: batch._id, userId: userObjectId }, { $inc: { quantity: -take } });
       createdSales.push({ _id: saleDoc._id as Types.ObjectId, total: saleDoc.total as number });
       remaining = Math.round((remaining - take) * 1000) / 1000;
     }
 
-    await Product.findOneAndUpdate({ _id: productObjectId, userId: userObjectId }, { $inc: { stock: -needMain }, $set: { lastSyncedAt: new Date() } });
+    const totalDeducted = needMain - remaining;
+    await Product.findOneAndUpdate({ _id: productObjectId, userId: userObjectId }, { $inc: { stock: -totalDeducted }, $set: { lastSyncedAt: new Date() } });
+    const firstBatch = await Batch.findOne({ productId: productObjectId, userId: userObjectId, quantity: { $gt: 0 } }).sort({ expiryDate: 1 });
+    await Product.updateOne({ _id: productObjectId }, { nearestExpiry: firstBatch?.expiryDate });
 
     if (isCredit && createdSales.length > 0) {
       try {
@@ -302,9 +278,7 @@ export async function POST(req: NextRequest) {
         const firstId = createdSales[0]._id;
         const customerDoc = await upsertKhataGrouped(userObjectId, customerName, totalForKhata, firstId, body.customerPhone || "", body.customerVillage || "");
         if (customerDoc?._id) {
-          for (const s of createdSales) {
-            await Sale.updateOne({ _id: s._id }, { $set: { customerId: customerDoc._id } });
-          }
+          for (const s of createdSales) await Sale.updateOne({ _id: s._id }, { $set: { customerId: customerDoc._id } });
         }
       } catch (err) {
         console.error("Khata grouping error:", err);

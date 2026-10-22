@@ -17,23 +17,13 @@ type MainUnit = "box" | "bottle" | "tube" | "piece";
 type SellUnit = "patta" | "half_patta" | "box" | "bottle" | "ml" | "tube" | "piece";
 
 type SaleUpdateBody = {
-  quantity?: number;
-  sellUnit?: SellUnit;
-  mainUnit?: MainUnit;
-  sellPrice?: number;
-  customerName?: string;
-  paymentType?: string;
-  status?: SaleStatus;
-  isCredit?: boolean;
+  quantity?: number; sellUnit?: SellUnit; mainUnit?: MainUnit;
+  sellPrice?: number; customerName?: string; paymentType?: string;
+  status?: SaleStatus; isCredit?: boolean;
 };
 
-function isValidObjectId(id: string): boolean { 
-  return Types.ObjectId.isValid(id); 
-}
-
-function normalizeName(name: string | undefined): string { 
-  return (name || "Walk-in").trim() || "Walk-in"; 
-}
+function isValidObjectId(id: string): boolean { return Types.ObjectId.isValid(id); }
+function normalizeName(name: string | undefined): string { return (name || "Walk-in").trim() || "Walk-in"; }
 
 function calcDeduction(mainUnit: MainUnit, sellUnit: SellUnit, qty: number, ppb: number, mlB: number) {
   let deductionMain = 0;
@@ -55,8 +45,7 @@ async function upsertKhataGrouped(userId: Types.ObjectId, name: string, amount: 
     {
       $setOnInsert: { name: safeName, normalizedName: normalized, userId, isPaid: false, paidAmount: 0 },
       $inc: { totalUdhar: Math.round(amount), totalBusiness: Math.round(amount), billsCount: 1 },
-      $set: { lastUdharDate: new Date() },
-      $addToSet: { saleIds: saleId },
+      $set: { lastUdharDate: new Date() }, $addToSet: { saleIds: saleId },
     },
     { upsert: true, new: true }
   );
@@ -102,70 +91,47 @@ export async function PUT(req: NextRequest, { params }: Params) {
     const ppb = existingSale.pattaPerBox ?? 10;
     const mlB = existingSale.mlPerBottle ?? 120;
     const newDeduct = calcDeduction(newMainUnit, newSellUnit, newQuantity, ppb, mlB);
-    const diff = Math.round((newDeduct - oldDeduct) * 1000) / 1000;
 
-    // STEP 1: Restore old batch quantity first
-    if (oldBatchId) {
-      await Batch.updateOne({ _id: oldBatchId }, { $inc: { quantity: oldDeduct } });
+    // STEP 1: Restore old batch
+    if (oldBatchId && Types.ObjectId.isValid(String(oldBatchId))) {
+      await Batch.updateOne({ _id: oldBatchId, userId: userObjectId }, { $inc: { quantity: oldDeduct } });
     }
 
-    // STEP 2: Check stock for diff
-    if (diff > 0.0001) {
-      const product = await Product.findOne({ _id: existingSale.productId, userId: userObjectId });
-      if (!product) {
-        // rollback restore
-        if (oldBatchId) await Batch.updateOne({ _id: oldBatchId }, { $inc: { quantity: -oldDeduct } });
-        return NextResponse.json({ error: "Product not found" }, { status: 404 });
+    // STEP 2: Check total batch stock after restore
+    const allBatchesForCheck = await Batch.find({ productId: existingSale.productId, userId: userObjectId, quantity: { $gt: 0 } }).sort({ expiryDate: 1 }).lean();
+    const totalAvailable = allBatchesForCheck.reduce((s, b) => s + b.quantity, 0);
+    if (totalAvailable < newDeduct - 0.0001) {
+      // rollback
+      if (oldBatchId && Types.ObjectId.isValid(String(oldBatchId))) {
+        await Batch.updateOne({ _id: oldBatchId, userId: userObjectId }, { $inc: { quantity: -oldDeduct } });
       }
-      if (product.stock < diff - 0.0001) {
-        if (oldBatchId) await Batch.updateOne({ _id: oldBatchId }, { $inc: { quantity: -oldDeduct } });
-        return NextResponse.json({ error: `Only ${product.stock} ${newMainUnit} left` }, { status: 400 });
-      }
+      return NextResponse.json({ error: `Only ${totalAvailable.toFixed(2)} ${newMainUnit} left in batches` }, { status: 400 });
     }
 
-    // STEP 3: FIFO deduct from batches for new quantity
-    const allBatches = await Batch.find({ 
-      productId: existingSale.productId, 
-      quantity: { $gt: 0 } 
-    }).sort({ expiryDate: 1 });
-
+    // STEP 3: FIFO deduct
     let remaining = newDeduct;
-    let firstBatchUsed: typeof allBatches[0] | null = null;
-    
-    for (const batch of allBatches) {
+    let firstBatchUsed: { _id: Types.ObjectId; batchNo: string; expiryDate: Date; buyPrice: number } | null = null;
+    for (const batch of allBatchesForCheck) {
       if (remaining <= 0) break;
       const take = Math.min(batch.quantity, remaining);
-      await Batch.updateOne({ _id: batch._id }, { $inc: { quantity: -take } });
-      if (!firstBatchUsed) firstBatchUsed = batch;
+      await Batch.updateOne({ _id: batch._id, userId: userObjectId }, { $inc: { quantity: -take } });
+      if (!firstBatchUsed) firstBatchUsed = { _id: batch._id as Types.ObjectId, batchNo: batch.batchNo, expiryDate: batch.expiryDate as Date, buyPrice: batch.buyPrice };
       remaining = Math.round((remaining - take) * 1000) / 1000;
     }
 
-    if (remaining > 0.0001) {
-      // Not enough batch stock - rollback
-      if (firstBatchUsed) {
-        // restore what we deducted
-        for (const b of allBatches) {
-          const wasDeducted = Math.min(b.quantity, newDeduct - remaining);
-          if (wasDeducted > 0) await Batch.updateOne({ _id: b._id }, { $inc: { quantity: wasDeducted } });
-        }
-      }
-      if (oldBatchId) await Batch.updateOne({ _id: oldBatchId }, { $inc: { quantity: -oldDeduct } });
-      return NextResponse.json({ error: "Not enough batch stock" }, { status: 400 });
+    const diff = Math.round((newDeduct - oldDeduct) * 1000) / 1000;
+    if (Math.abs(diff) > 0.0001) {
+      await Product.findOneAndUpdate({ _id: existingSale.productId, userId: userObjectId }, { $inc: { stock: -diff }, $set: { lastSyncedAt: new Date() } });
     }
 
-    // STEP 4: Update product stock
-    if (Math.abs(diff) > 0.0001) {
-      await Product.findOneAndUpdate(
-        { _id: existingSale.productId, userId: userObjectId },
-        { $inc: { stock: -diff }, $set: { lastSyncedAt: new Date() } }
-      );
-    }
+    // update nearestExpiry
+    const firstAfter = await Batch.findOne({ productId: existingSale.productId, userId: userObjectId, quantity: { $gt: 0 } }).sort({ expiryDate: 1 });
+    await Product.updateOne({ _id: existingSale.productId }, { nearestExpiry: firstAfter?.expiryDate });
 
     const oldCustomerName = normalizeName(existingSale.customerName);
     const oldNormalized = oldCustomerName.toLowerCase();
     const oldIsCredit = existingSale.isCredit || existingSale.status === "pending";
 
-    // STEP 5: Update sale fields with new batch info
     existingSale.quantity = newQuantity;
     existingSale.sellUnit = newSellUnit;
     existingSale.mainUnit = newMainUnit;
@@ -192,25 +158,15 @@ export async function PUT(req: NextRequest, { params }: Params) {
       existingSale.isCredit = body.status === "pending";
     }
 
-    // Recalculate total/profit based on new batch buyPrice
     const buyPrice = existingSale.buyPriceMain ?? 0;
-    let total = 0;
-    let profit = 0;
+    let total = 0; let profit = 0;
     if (newMainUnit === "box") {
       const buyPerPatta = buyPrice / ppb;
-      if (newSellUnit === "patta") {
-        total = Number(newSellPrice) * newQuantity;
-        profit = (Number(newSellPrice) - buyPerPatta) * newQuantity;
-      } else if (newSellUnit === "half_patta") {
-        total = Number(newSellPrice) * newQuantity;
-        profit = (Number(newSellPrice) - buyPerPatta/2) * newQuantity;
-      } else {
-        total = Number(newSellPrice) * newQuantity;
-        profit = (Number(newSellPrice) - buyPrice) * newQuantity;
-      }
+      if (newSellUnit === "patta") { total = Number(newSellPrice) * newQuantity; profit = (Number(newSellPrice) - buyPerPatta) * newQuantity; }
+      else if (newSellUnit === "half_patta") { total = Number(newSellPrice) * newQuantity; profit = (Number(newSellPrice) - buyPerPatta/2) * newQuantity; }
+      else { total = Number(newSellPrice) * newQuantity; profit = (Number(newSellPrice) - buyPrice) * newQuantity; }
     } else {
-      total = Number(newSellPrice) * newQuantity;
-      profit = (Number(newSellPrice) - buyPrice) * newQuantity;
+      total = Number(newSellPrice) * newQuantity; profit = (Number(newSellPrice) - buyPrice) * newQuantity;
     }
     existingSale.total = Math.round(total);
     existingSale.profit = Math.round(profit);
@@ -272,25 +228,20 @@ export async function DELETE(_req: NextRequest, { params }: Params) {
 
     const restoreQty = saleDoc.deductionMain ?? saleDoc.quantity;
     
-    // Restore product stock
     await Product.findOneAndUpdate(
       { _id: saleDoc.productId, userId: userObjectId },
       { $inc: { stock: restoreQty }, $set: { lastSyncedAt: new Date() } }
     );
 
-    // Restore batch stock - THIS WAS MISSING
-    if (saleDoc.batchId) {
-      await Batch.updateOne(
-        { _id: saleDoc.batchId },
-        { $inc: { quantity: restoreQty } }
-      );
+    if (saleDoc.batchId && Types.ObjectId.isValid(String(saleDoc.batchId))) {
+      await Batch.updateOne({ _id: saleDoc.batchId, userId: userObjectId }, { $inc: { quantity: restoreQty } });
     } else {
-      // Legacy sale without batchId - restore to earliest batch
-      const earliest = await Batch.findOne({ productId: saleDoc.productId }).sort({ expiryDate: 1 });
-      if (earliest) {
-        await Batch.updateOne({ _id: earliest._id }, { $inc: { quantity: restoreQty } });
-      }
+      const earliest = await Batch.findOne({ productId: saleDoc.productId, userId: userObjectId }).sort({ expiryDate: 1 });
+      if (earliest) await Batch.updateOne({ _id: earliest._id, userId: userObjectId }, { $inc: { quantity: restoreQty } });
     }
+
+    const firstAfter = await Batch.findOne({ productId: saleDoc.productId, userId: userObjectId, quantity: { $gt: 0 } }).sort({ expiryDate: 1 });
+    await Product.updateOne({ _id: saleDoc.productId }, { nearestExpiry: firstAfter?.expiryDate });
 
     if (saleDoc.isCredit || saleDoc.status === "pending" || saleDoc.paymentType === "credit") {
       try {
@@ -313,9 +264,7 @@ export async function DELETE(_req: NextRequest, { params }: Params) {
             { $inc: { totalUdhar: -saleAmount, totalBusiness: -saleAmount, billsCount: -1 } }
           );
           await Customer.deleteOne({
-            userId: userObjectId,
-            normalizedName: custName.toLowerCase(),
-            isPaid: false,
+            userId: userObjectId, normalizedName: custName.toLowerCase(), isPaid: false,
             $or: [{ billsCount: { $lte: 0 } }, { totalUdhar: { $lte: 0.5 } }],
           });
         }
