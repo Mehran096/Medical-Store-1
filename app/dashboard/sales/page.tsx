@@ -1,18 +1,17 @@
 "use client";
 import { useEffect, useState, useMemo, useCallback, useSyncExternalStore } from "react";
 import { offlineDB } from "@/lib/offline-db";
-import type { OfflineProduct, OfflineBatch } from "@/lib/offline-db";
+import type { OfflineBatch } from "@/lib/offline-db";
 import { saveSaleOffline, syncOfflineSales } from "@/lib/offline-sync";
 import { getOfflineUser } from "@/lib/offline-auth";
 
 type MainUnit = "box" | "bottle" | "tube" | "piece";
 type SellUnit = "patta" | "half_patta" | "box" | "bottle" | "tube" | "piece";
-
 type Product = { 
-  _id: string; name: string; company?: string; mainUnit: MainUnit; pattaPerBox: number; mlPerBottle: number; 
+  _id: string; productId?: string; name: string; company?: string; mainUnit: MainUnit; pattaPerBox: number; mlPerBottle: number; 
   buyPrice?: number; buyPriceAvg?: number;
   sellPrice: number; stock: number; expiryDate?: string; rack?: string; batchNo?: string;
-  batches?: { batchNo: string; expiryDate: string; buyPrice: number; quantity: number }[]
+  batches?: { _id?: string; productId?: string; batchNo: string; expiryDate: string; buyPrice: number; quantity: number }[]
 };
 type Sale = { _id: string; productId: string; productName: string; mainUnit: MainUnit; sellUnit: SellUnit; quantity: number; sellPrice: number; deductionMain: number; total: number; profit: number; createdAt: string; customerName?: string; status?: string; paymentType?: string; batchNo?: string; };
 type CartItem = { name:string; qty:number; unit:string; price:number; total:number };
@@ -20,8 +19,8 @@ type BillType = { items: CartItem[]; total:number; customer:string; time:string;
 type FilterType = "today" | "yesterday" | "weekly" | "monthly" | "yearly" | "all";
 type Pagination = { page: number; totalPages: number; hasMore: boolean; totalCount: number };
 type SalesApiResponse = { sales: Sale[]; total: number; profit: number; pendingTotal?: number; pagination: Pagination };
-// FIXED V18.4: add _id (batch _id)
 type BatchApiItem = { _id?: string; productId: string; productName?: string; batchNo: string; expiryDate: string; buyPrice: number; quantity: number; mainUnit?: MainUnit; company?: string; sellPrice?: number };
+type ProductApiResponse = { products: Product[]; pagination: Pagination };
 
 const FILTERS: FilterType[] = ["today", "yesterday", "weekly", "monthly", "yearly", "all"];
 const PRODUCTS_PER_PAGE = 12;
@@ -33,16 +32,27 @@ function useIsOnline(){
   return useSyncExternalStore(subscribe, getSnapshot, getServerSnapshot);
 }
 function generateLocalId(){ return `local_${Date.now()}_${Math.random().toString(36).slice(2,9)}`; }
-function isExpired(e?:string){ if(!e) return false; return new Date(e) < new Date(); }
 function fmt(n:number, d=1){ if(isNaN(n)) return "0"; const v = Number(n); if(!Number.isFinite(v)) return "0"; return v % 1 === 0? v.toFixed(0) : v.toFixed(d).replace(/\.0+$/,""); }
-function fmt2(n:number){ return fmt(n,2); }
 function getExpiryStatus(e?: string): "expired" | "soon" | "ok" {
   if(!e) return "ok"; const now = new Date(); const exp = new Date(e);
   const diffDays = Math.ceil((exp.getTime() - now.getTime()) / 86400000);
   if(diffDays < 0) return "expired"; if(diffDays <= 90) return "soon"; return "ok";
 }
+function isExpired(e?:string){ if(!e) return false; const t=new Date(); t.setHours(0,0,0,0); return new Date(e) < t; }
+function getSaleableBatches(p: Product){
+  if(!p.batches || !p.batches.length) return [];
+  const today=new Date(); today.setHours(0,0,0,0);
+  return p.batches.filter(b=> b.quantity>0.0001 && new Date(b.expiryDate) >= today).sort((a,b)=> new Date(a.expiryDate).getTime() - new Date(b.expiryDate).getTime());
+}
+function getSaleableStock(p: Product): number {
+  const saleable = getSaleableBatches(p);
+  if(saleable.length>0) return saleable.reduce((s,b)=>s+b.quantity,0);
+  if(p.expiryDate && isExpired(p.expiryDate)) return 0;
+  return p.stock;
+}
 function getProductBuyPrice(p: Product): number {
-  // FIXED: sort batches by expiry ASC for FIFO
+  const saleable = getSaleableBatches(p);
+  if(saleable.length>0) return saleable[0].buyPrice || p.buyPriceAvg || p.buyPrice || 0;
   if(p.batches && p.batches.length>0){
     const sorted = [...p.batches].sort((a,b)=> new Date(a.expiryDate).getTime() - new Date(b.expiryDate).getTime());
     return sorted[0].buyPrice || p.buyPriceAvg || p.buyPrice || 0;
@@ -50,6 +60,8 @@ function getProductBuyPrice(p: Product): number {
   return p.buyPriceAvg || p.buyPrice || 0;
 }
 function getProductExpiry(p: Product): string | undefined {
+  const saleable = getSaleableBatches(p);
+  if(saleable.length>0) return saleable[0].expiryDate;
   if(p.batches && p.batches.length>0){
     const sorted = [...p.batches].sort((a,b)=> new Date(a.expiryDate).getTime() - new Date(b.expiryDate).getTime());
     return sorted[0].expiryDate || p.expiryDate;
@@ -57,13 +69,15 @@ function getProductExpiry(p: Product): string | undefined {
   return p.expiryDate;
 }
 function getProductBatchNo(p: Product): string | undefined {
+  const saleable = getSaleableBatches(p);
+  if(saleable.length>0) return saleable[0].batchNo;
   if(p.batches && p.batches.length>0){
     const sorted = [...p.batches].sort((a,b)=> new Date(a.expiryDate).getTime() - new Date(b.expiryDate).getTime());
     return sorted[0].batchNo || p.batchNo;
   }
   return p.batchNo;
 }
-function toOfflineProduct(p: Product, userId: string): OfflineProduct {
+function toOfflineProduct(p: Product, userId: string){
   return { 
     _id: p._id, localId: p._id, name: p.name, company: p.company?? "", generic: "", barcode: "", rack: p.rack?? "", 
     mainUnit: p.mainUnit, pattaPerBox: p.pattaPerBox, mlPerBottle: p.mlPerBottle, 
@@ -88,7 +102,7 @@ export default function SalesPage() {
   const [pagination, setPagination] = useState<Pagination>({ page: 1, totalPages: 1, hasMore: false, totalCount: 0 });
   const [mounted, setMounted] = useState(false); const isOnline = useIsOnline(); const isOffline = mounted &&!isOnline;
   const [pendingCount, setPendingCount] = useState(0); const [syncing, setSyncing] = useState(false);
-  const [deletingId, setDeletingId] = useState<string | null>(null); const [sellingId, setSellingId] = useState<string | null>(null);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
   const [customerName, setCustomerName] = useState("Walk-in"); const [paymentType, setPaymentType] = useState<"cash" | "credit">("cash");
   const [showExpiry, setShowExpiry] = useState(false); const [nowMs, setNowMs] = useState(0);
   const [lastBill, setLastBill] = useState<BillType | null>(null);
@@ -127,7 +141,7 @@ export default function SalesPage() {
   const getSellCalc = useCallback((p: Product) => {
     const sellUnit = (sellUnitMap[p._id] || getDefaultSellUnit(p.mainUnit)) as SellUnit;
     const qty = qtyMap[p._id] || 1; 
-    const ppb = p.pattaPerBox || 10;
+    const ppb = p.pattaPerBox && p.pattaPerBox>0 ? p.pattaPerBox : 10;
     const defaultPrice = getDefaultPrice(p, sellUnit); 
     const str = priceMap[p._id];
     const sellPrice = str===undefined||str===""? defaultPrice : Number(str)||defaultPrice;
@@ -140,7 +154,7 @@ export default function SalesPage() {
       else{ deductMain=qty; totalCalc=sellPrice*qty; profitCalc=(sellPrice-buyPrice)*qty; } 
     }
     else{ deductMain=qty; totalCalc=sellPrice*qty; profitCalc=(sellPrice-buyPrice)*qty; }
-    return { sellUnit, qty, sellPrice, defaultPrice, deductMain: Math.round(deductMain*100)/100, total: Math.round(totalCalc*100)/100, profit: Math.round(profitCalc*100)/100, buyPrice };
+    return { sellUnit, qty, sellPrice, defaultPrice, deductMain: Math.round(deductMain*1000)/1000, total: Math.round(totalCalc*100)/100, profit: Math.round(profitCalc*100)/100, buyPrice };
   }, [sellUnitMap, qtyMap, priceMap]);
 
   const refreshSalesOnly = useCallback(async () => {
@@ -172,9 +186,9 @@ export default function SalesPage() {
     const loadProducts=async()=>{
       try{
         if(productPage===1) setLoadingProducts(true); else setLoadingMoreProducts(true);
-        const cached=await offlineDB.products.toArray(); 
         const isOfflineNow=typeof window!=="undefined"&&!window.navigator.onLine;
         if(isOfflineNow){
+          const cached=await offlineDB.products.toArray();
           const filtered = productSearch? cached.filter(c=>c.name.toLowerCase().includes(productSearch.toLowerCase()) || (c.company||"").toLowerCase().includes(productSearch.toLowerCase())) : cached;
           const totalCount = filtered.length; const totalPages = Math.ceil(totalCount / PRODUCTS_PER_PAGE) || 1;
           const hasMore = productPage < totalPages; const pageSlice = filtered.slice(0, productPage * PRODUCTS_PER_PAGE);
@@ -183,15 +197,36 @@ export default function SalesPage() {
               _id:c._id||c.localId, name:c.name, company:c.company, mainUnit:c.mainUnit as MainUnit,
               pattaPerBox:c.pattaPerBox, mlPerBottle:c.mlPerBottle,
               buyPrice:c.buyPriceAvg||0, buyPriceAvg:c.buyPriceAvg||0, sellPrice:c.sellPrice, stock:c.stock, rack:c.rack,
+              batches: [],
             }))); 
             setProductPagination({ page: productPage, totalPages, hasMore, totalCount }); 
           }
           setLoadingProducts(false); setLoadingMoreProducts(false); return;
         }
         const res=await fetch(`/api/products?search=${encodeURIComponent(productSearch)}&page=${productPage}&limit=${PRODUCTS_PER_PAGE}`,{signal:controller.signal});
-        const data=await res.json() as {products:Product[];pagination:Pagination}|Product[]; const list=Array.isArray(data)?data:data.products;
-        if(cancelled) return; if(productPage===1) setProducts(list); else setProducts(prev=>[...prev,...list]); if(!Array.isArray(data)&&data.pagination) setProductPagination(data.pagination);
-        if(list && list.length>0){ const offlineUser = getOfflineUser(); const userId = offlineUser?._id?? "offline"; const toCache = list.map(p=>toOfflineProduct(p, userId)); await offlineDB.products.bulkPut(toCache); }
+        const data=await res.json() as ProductApiResponse | Product[]; 
+        const list: Product[] = Array.isArray(data) ? data : data.products;
+        if(cancelled) return;
+        const batchList: OfflineBatch[] = await offlineDB.batches.toArray();
+        const withBatches = list.map(prod=>{
+          const bForProd = batchList.filter(b=>b.productId===prod._id);
+          if(bForProd.length>0){
+            const saleableSum = bForProd.filter(b=>b.quantity>0.0001 && new Date(b.expiryDate) >= new Date(new Date().setHours(0,0,0,0))).reduce((s,b)=>s+b.quantity,0);
+            return {
+              ...prod,
+              batches: bForProd.map(b=>({_id:b.localId, productId:b.productId, batchNo:b.batchNo, expiryDate:b.expiryDate, buyPrice:b.buyPrice, quantity:b.quantity})),
+              stock: saleableSum>0 ? saleableSum : prod.stock,
+            };
+          }
+          return prod;
+        });
+        if(productPage===1) setProducts(withBatches); else setProducts(prev=>[...prev,...withBatches]); 
+        if(!Array.isArray(data)&&data.pagination) setProductPagination(data.pagination);
+        if(withBatches.length>0){ 
+          const offlineUser = getOfflineUser(); const userId = offlineUser?._id?? "offline"; 
+          const toCache = withBatches.map(p=>toOfflineProduct(p, userId)); 
+          await offlineDB.products.bulkPut(toCache); 
+        }
       }catch(err){ if((err as Error).name!=="AbortError") console.error(err);} finally{ if(!cancelled){ setLoadingProducts(false); setLoadingMoreProducts(false);} }
     }; void loadProducts(); return()=>{ cancelled=true; controller.abort(); };
   },[productSearch,productPage]);
@@ -204,7 +239,7 @@ export default function SalesPage() {
           const mapped = await Promise.all(batches.map(async b=>{
             const prod = await offlineDB.products.where('_id').equals(b.productId).or('localId').equals(b.productId).first();
             return {
-              _id: b.productId, name: prod?.name || b.batchNo, company: prod?.company,
+              _id: b.localId, productId: b.productId, name: prod?.name || b.batchNo, company: prod?.company,
               mainUnit: (prod?.mainUnit as MainUnit) || "box", pattaPerBox: prod?.pattaPerBox || 10,
               mlPerBottle: prod?.mlPerBottle || 120, buyPrice: b.buyPrice, buyPriceAvg: b.buyPrice,
               sellPrice: prod?.sellPrice || 0, stock: b.quantity, expiryDate: b.expiryDate, batchNo: b.batchNo
@@ -218,7 +253,6 @@ export default function SalesPage() {
           const json = await res.json() as BatchApiItem[] | { batches: BatchApiItem[] };
           const list: BatchApiItem[] = Array.isArray(json) ? json : json.batches || [];
           if(list.length>0){
-            // FIXED V18.4: DEDUPE same product+batchNo+expiry
             const uniqueMap = new Map<string, BatchApiItem>();
             for (const b of list) {
               const key = `${b.productId}_${b.batchNo}_${b.expiryDate.slice(0,10)}`;
@@ -228,7 +262,7 @@ export default function SalesPage() {
             }
             const deduped = Array.from(uniqueMap.values());
             setExpiryProducts(deduped.map((b)=>({
-              _id: b._id || `${b.productId}_${b.batchNo}`, name: b.productName || b.batchNo, company: b.company,
+              _id: b._id || `${b.productId}_${b.batchNo}`, productId: b.productId, name: b.productName || b.batchNo, company: b.company,
               mainUnit: b.mainUnit as MainUnit || "box", pattaPerBox: 10, mlPerBottle: 120,
               buyPrice: b.buyPrice, buyPriceAvg: b.buyPrice, sellPrice: b.sellPrice || 0,
               stock: b.quantity, expiryDate: b.expiryDate, batchNo: b.batchNo
@@ -252,27 +286,136 @@ export default function SalesPage() {
     }; void fetchData(); return()=>controller.abort();
   },[filter,page]);
 
-  const sell=async(p:Product)=>{
-    if(sellingId) return; 
-    const expForCheck = getProductExpiry(p);
-    if(isExpired(expForCheck)&&!confirm(`⚠️ ${p.name} EXPIRED - Sell?`)) return;
-    if(paymentType==="credit"&&(!customerName||customerName.toLowerCase()==="walk-in"||customerName.trim().length<2)){ alert("Enter customer name for Udhar"); return; }
-    const calc=getSellCalc(p); if(p.stock<calc.deductMain-0.0001){ alert(`Only ${fmt(p.stock,1)} ${p.mainUnit} left`); return; }
-    const offlineUser=getOfflineUser(); setSellingId(p._id); const finalCustomer=customerName.trim()||"Walk-in";
-    setProducts(prev=>prev.map(prod=>prod._id===p._id?{...prod,stock:Math.round((prod.stock-calc.deductMain)*100)/100}:prod));
-    setExpiryProducts(prev=>prev.map(prod=>prod._id===p._id?{...prod,stock:Math.round((prod.stock-calc.deductMain)*100)/100}:prod));
-    const optimistic:Sale={_id:generateLocalId(),productId:p._id,productName:p.name,mainUnit:p.mainUnit,sellUnit:calc.sellUnit,quantity:calc.qty,sellPrice:calc.sellPrice,deductionMain:calc.deductMain,total:calc.total,profit:calc.profit,createdAt:new Date().toISOString(),customerName:finalCustomer,status:paymentType==="credit"?"pending":"paid",paymentType, batchNo: getProductBatchNo(p)};
-    setSales(prev=>[optimistic,...prev]); setTotal(t=>t+calc.total); setProfit(pr=>pr+calc.profit);
+  const sell = (p: Product) => {
+    const saleableStock = getSaleableStock(p);
+    if (saleableStock <= 0.0001 && p.stock > 0) {
+      alert(`⚠️ ${p.name} has only expired stock (Total ${p.stock}). Discard expired first.`);
+      return;
+    }
+    if (paymentType === "credit" && (!customerName || customerName.toLowerCase() === "walk-in" || customerName.trim().length < 2)) {
+      alert("Enter customer name for Udhar");
+      return;
+    }
+    const calc = getSellCalc(p);
+    const ppb = p.pattaPerBox && p.pattaPerBox > 0 ? p.pattaPerBox : 10;
+
+    // V25 FINAL - half_patta ghost fix
+    const saleablePattaRaw = p.mainUnit === "box" ? saleableStock * ppb : saleableStock;
+    let needPattaRaw = calc.qty;
+    if (p.mainUnit === "box") {
+      if (calc.sellUnit === "patta") needPattaRaw = calc.qty;
+      else if (calc.sellUnit === "half_patta") needPattaRaw = calc.qty * 0.5;
+      else if (calc.sellUnit === "box") needPattaRaw = calc.qty * ppb;
+    }
+    const saleablePatta = Math.round(saleablePattaRaw * 1000) / 1000;
+    const needPatta = Math.round(needPattaRaw * 1000) / 1000;
+    const EPS = calc.sellUnit === "half_patta" ? 0.03 : 0.005;
+    if (saleablePatta + EPS < needPatta) {
+      alert(`Only ${saleablePatta.toFixed(3)} patta (${saleableStock.toFixed(3)} box) left, need ${needPatta.toFixed(1)} patta`);
+      return;
+    }
+
+    const offlineUser = getOfflineUser();
+    const finalCustomer = customerName.trim() || "Walk-in";
+    const batchNo = getProductBatchNo(p);
+    const batchObj = p.batches?.find((b) => b.batchNo === batchNo);
+    const batchId = batchObj?._id || p._id;
+
+    setProducts((prev) =>
+      prev.map((prod) =>
+        prod._id === p._id
+          ? {
+              ...prod,
+              stock: Math.round((prod.stock - calc.deductMain) * 1000) / 1000,
+              batches: prod.batches?.map((b) => ({ ...b, quantity: b.batchNo === batchNo ? Math.max(0, Math.round((b.quantity - calc.deductMain)*1000)/1000) : b.quantity })),
+            }
+          : prod
+      )
+    );
+    setExpiryProducts((prev) => prev.map((prod) => (prod.productId === p._id ? { ...prod, stock: Math.round((prod.stock - calc.deductMain) * 1000) / 1000 } : prod)));
+
+    const optimistic: Sale = {
+      _id: generateLocalId(),
+      productId: p._id,
+      productName: p.name,
+      mainUnit: p.mainUnit,
+      sellUnit: calc.sellUnit,
+      quantity: calc.qty,
+      sellPrice: calc.sellPrice,
+      deductionMain: calc.deductMain,
+      total: calc.total,
+      profit: calc.profit,
+      createdAt: new Date().toISOString(),
+      customerName: finalCustomer,
+      status: paymentType === "credit" ? "pending" : "paid",
+      paymentType,
+      batchNo,
+    };
+    setSales((prev) => [optimistic, ...prev]);
+    setTotal((t) => t + calc.total);
+    setProfit((pr) => pr + calc.profit);
+
     const newItem: CartItem = { name: p.name, qty: calc.qty, unit: calc.sellUnit, price: calc.sellPrice, total: calc.total };
-    setLastBill(prev=>{
+    setLastBill((prev) => {
       const billNo = Date.now().toString().slice(-6);
-      const timeStr = new Date().toLocaleString("en-PK",{timeZone:"Asia/Karachi"});
-      if(!prev) return { items:[newItem], total:newItem.total, customer:finalCustomer, time:timeStr, billNo };
-      if(prev.customer === finalCustomer){ const items = [...prev.items, newItem]; return { items, total: items.reduce((a,b)=>a+b.total,0), customer:finalCustomer, time:prev.time, billNo: prev.billNo }; }
-      else { return { items:[newItem], total:newItem.total, customer:finalCustomer, time:timeStr, billNo }; }
+      const timeStr = new Date().toLocaleString("en-PK", { timeZone: "Asia/Karachi" });
+      if (!prev) return { items: [newItem], total: newItem.total, customer: finalCustomer, time: timeStr, billNo };
+      if (prev.customer === finalCustomer) {
+        const items = [...prev.items, newItem];
+        return { items, total: items.reduce((a, b) => a + b.total, 0), customer: finalCustomer, time: prev.time, billNo: prev.billNo };
+      } else {
+        return { items: [newItem], total: newItem.total, customer: finalCustomer, time: timeStr, billNo };
+      }
     });
-    setTimeout(()=>setSellingId(null),400);
-    try{ await saveSaleOffline({productId:p._id,productName:p.name,quantity:calc.qty,mainUnit:p.mainUnit,sellUnit:calc.sellUnit,pattaPerBox:p.pattaPerBox,mlPerBottle:p.mlPerBottle,buyPriceMain:calc.buyPrice,sellPrice:calc.sellPrice,userId:offlineUser?._id||"offline",customerName:finalCustomer,paymentType}); if(window.navigator.onLine) void syncPendingSales(); else setPendingCount(c=>c+1); }catch{ setPendingCount(c=>c+1); }
+
+    void (async () => {
+      try {
+        if (typeof window !== "undefined" && window.navigator.onLine) {
+          const res = await fetch("/api/sales", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              productId: p._id,
+              quantity: calc.qty,
+              sellUnit: calc.sellUnit,
+              mainUnit: p.mainUnit,
+              sellPrice: calc.sellPrice,
+              pattaPerBox: ppb,
+              mlPerBottle: p.mlPerBottle,
+              deductionMain: calc.deductMain,
+              batchId,
+              batchNo,
+              buyPriceMain: calc.buyPrice,
+              total: calc.total,
+              profit: calc.profit,
+              localId: optimistic._id,
+              customerName: finalCustomer,
+              paymentType,
+            }),
+          });
+          if (res.ok) {
+            const saved = (await res.json()) as { _id: string };
+            setSales((prev) => prev.map((s) => (s._id === optimistic._id ? { ...s, _id: saved._id } : s)));
+          } else {
+            await saveSaleOffline({
+              productId: p._id, productName: p.name, quantity: calc.qty, mainUnit: p.mainUnit, sellUnit: calc.sellUnit,
+              pattaPerBox: ppb, mlPerBottle: p.mlPerBottle, buyPriceMain: calc.buyPrice, sellPrice: calc.sellPrice,
+              userId: offlineUser?._id || "offline", customerName: finalCustomer, paymentType, batchId, batchNo, deductionMain: calc.deductMain,
+            });
+            setPendingCount((c) => c + 1);
+          }
+        } else {
+          await saveSaleOffline({
+            productId: p._id, productName: p.name, quantity: calc.qty, mainUnit: p.mainUnit, sellUnit: calc.sellUnit,
+            pattaPerBox: ppb, mlPerBottle: p.mlPerBottle, buyPriceMain: calc.buyPrice, sellPrice: calc.sellPrice,
+            userId: offlineUser?._id || "offline", customerName: finalCustomer, paymentType, batchId, batchNo, deductionMain: calc.deductMain,
+          });
+          setPendingCount((c) => c + 1);
+        }
+      } catch {
+        // silent
+      }
+    })();
   };
 
   const clearCart = () => { setLastBill(null); setShowPrint(false); };
@@ -297,25 +440,65 @@ export default function SalesPage() {
     w.document.open(); w.document.write(printHtml); w.document.close();
   },[lastBill]);
 
-  const handleDeleteSale=async(id:string)=>{
-    if(!confirm("Delete sale and restore stock?")) return; setDeletingId(id);
-    try{
-      const saleToDelete=sales.find(s=>s._id===id); const restore=saleToDelete?.deductionMain??0;
-      setSales(prev=>prev.filter(s=>s._id!==id)); if(saleToDelete){ setTotal(t=>Math.max(0,t-saleToDelete.total)); setProfit(pr=>Math.max(0,pr-saleToDelete.profit)); }
-      if(saleToDelete?.productId){ setProducts(prev=>prev.map(prod=>prod._id===saleToDelete.productId?{...prod,stock:Math.round((prod.stock+restore)*100)/100}:prod)); setExpiryProducts(prev=>prev.map(prod=>prod._id===saleToDelete.productId?{...prod,stock:Math.round((prod.stock+restore)*100)/100}:prod)); }
-      if(id.startsWith("local_")){ 
+  const handleDeleteSale = async (id: string) => {
+    if (!confirm("Delete sale and restore stock?")) return;
+    const saleToDelete = sales.find((s) => s._id === id);
+    if (!saleToDelete) return;
+    const restore = saleToDelete.deductionMain ?? 0;
+    setDeletingId(id);
+    setSales((prev) => prev.filter((s) => s._id !== id));
+    setTotal((t) => Math.max(0, t - saleToDelete.total));
+    setProfit((pr) => Math.max(0, pr - saleToDelete.profit));
+    setProducts((prev) =>
+      prev.map((prod) => (prod._id === saleToDelete.productId ? { ...prod, stock: Math.round((prod.stock + restore) * 1000) / 1000 } : prod))
+    );
+    try {
+      if (id.startsWith("local_")) {
         const s = await offlineDB.sales.get(id);
-        if(s?.batchId){
-          const b = await offlineDB.batches.where('localId').equals(s.batchId).or('_id').equals(s.batchId).first();
-          if(b) await offlineDB.batches.update(b.localId, { quantity: b.quantity + restore });
+        if (s?.batchId) {
+          const b = await offlineDB.batches.where("localId").equals(s.batchId).or("_id").equals(s.batchId).first();
+          if (b) await offlineDB.batches.update(b.localId, { quantity: b.quantity + restore });
         }
-        await offlineDB.sales.delete(id); 
-        if(saleToDelete?.productId) await offlineDB.products.where("_id").equals(saleToDelete.productId).or("localId").equals(saleToDelete.productId).modify(prod=>{prod.stock+=restore;}); 
-        setPendingCount(c=>Math.max(0,c-1)); 
+        await offlineDB.sales.delete(id);
+        await offlineDB.products.where("_id").equals(saleToDelete.productId).or("localId").equals(saleToDelete.productId).modify((prod) => { prod.stock += restore; });
+        setPendingCount((c) => Math.max(0, c - 1));
+      } else {
+        const res = await fetch(`/api/sales/${id}`, { method: "DELETE" });
+        const data = await res.json() as { error?: string };
+        if (!res.ok) throw new Error(data.error || "Delete failed");
       }
-      else{ const res=await fetch(`/api/sales/${id}`,{method:"DELETE"}); if(!res.ok) throw new Error("Delete failed"); } 
-      await refreshSalesOnly();
-    }catch(e){ alert((e as Error).message); void refreshSalesOnly(); } finally{ setDeletingId(null); }
+    } catch (e) {
+      alert((e as Error).message);
+      void refreshSalesOnly();
+    } finally {
+      setDeletingId(null);
+    }
+  };
+
+  const handleDiscard = async (n: Product) => {
+    if (!confirm(`Discard ${n.name} Batch ${n.batchNo} Qty ${n.stock}?`)) return;
+    try {
+      const res = await fetch(`/api/discard-expired`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          batchId: n._id && n._id.length === 24 ? n._id : undefined,
+          productId: n.productId,
+          batchNo: n.batchNo,
+          expiryDate: n.expiryDate,
+        }),
+      });
+      const data = await res.json() as { newStock?: number; error?: string };
+      if (res.ok) {
+        alert(`Discarded ${data.newStock !== undefined ? `New stock ${data.newStock}` : ""}`);
+        setExpiryProducts((prev) => prev.filter((p) => !(p.batchNo === n.batchNo && p.expiryDate === n.expiryDate && p.productId === n.productId)));
+        setProducts((prev) => prev.map((prod) => (prod._id === n.productId ? { ...prod, stock: data.newStock ?? Math.max(0, prod.stock - n.stock) } : prod)));
+      } else {
+        alert(data.error || "Failed");
+      }
+    } catch (err) {
+      alert((err as Error).message);
+    }
   };
 
   return (
@@ -324,7 +507,7 @@ export default function SalesPage() {
         <div className="max-w-7xl mx-auto flex flex-col gap-1.5">
           <div className="flex flex-wrap justify-between items-center gap-1">
             <div className="flex flex-wrap gap-2 items-center">
-              <h1 className="text-[11px] font-bold">💊 V18.4 DEDUPE {isOffline?"📶 Offline":""}</h1>
+              <h1 className="text-[11px] font-bold">💊 V25 FIXED {isOffline?"📶 Offline":""}</h1>
               {lastBill && (
                 <div className="flex gap-1">
                   <button onClick={()=>setShowPrint(true)} className="bg-green-600 hover:bg-green-700 text-white px-3 py-1.5 rounded-full text-[10px] font-bold animate-pulse shadow">🖨️ Print Bill ({lastBill.items.length} • Rs.{fmt(lastBill.total,0)})</button>
@@ -335,7 +518,20 @@ export default function SalesPage() {
             <div className="flex gap-1.5 items-center">
               <div className="relative">
                 <button onClick={()=>setShowExpiry(!showExpiry)} className="relative p-1.5 bg-gray-100 rounded-full hover:bg-gray-200"><span className="text-[16px]">🔔</span>{expiryNotifications.length>0 && (<span className="absolute -top-1 -right-1 bg-red-600 text-white text-[8px] w-4 h-4 rounded-full flex items-center justify-center font-bold animate-pulse">{expiryNotifications.length}</span>)}</button>
-                {showExpiry && (<><div className="fixed inset-0 bg-black/20 z-40" onClick={()=>setShowExpiry(false)}></div><div className="fixed md:absolute left-2 right-2 md:left-auto md:right-0 top-20 md:top-9 w-auto md:w-80 bg-white border shadow-xl rounded-xl z-50 max-h-[70vh] md:max-h-80 overflow-hidden flex flex-col"><div className="p-2.5 border-b bg-red-50 flex justify-between items-center"><p className="text-[11px] font-bold">⚠️ Expiry Alerts (90 days)</p><button onClick={()=>setShowExpiry(false)} className="text-[11px] bg-white border px-2.5 py-1 rounded-full">✕</button></div><div className="overflow-y-auto flex-1">{expiryNotifications.length===0? (<p className="p-4 text-[11px] text-center text-green-600">✅ No expiry</p>) : expiryNotifications.map((n, idx)=>(<div key={`${n._id}_${n.batchNo}_${n.expiryDate}_${idx}`} className={`p-2 border-b text-[10px] ${n.status==="expired"?"bg-red-50 border-l-4 border-l-red-600":"bg-amber-50 border-l-4 border-l-amber-400"}`}><div className="flex justify-between gap-1"><span className="font-bold truncate flex-1">{n.name} {n.batchNo? `• Batch ${n.batchNo}`:""}</span><span className={`px-1.5 py-0.5 rounded-full text-[8px] font-bold ${n.status==="expired"?"bg-red-600 text-white":"bg-amber-500 text-white"}`}>{n.status==="expired"?`EXPIRED ${Math.abs(n.daysLeft)}d`:`${n.daysLeft}d left`}</span></div><p className="text-[9px] text-gray-500 mt-0.5">{n.company? `${n.company} • `:""}Qty {fmt(n.stock,1)} • Exp: {n.expiryDate?.slice(0,10)}</p></div>))}</div></div></>)}
+                {showExpiry && (<><div className="fixed inset-0 bg-black/20 z-40" onClick={()=>setShowExpiry(false)}></div><div className="fixed md:absolute left-2 right-2 md:left-auto md:right-0 top-20 md:top-9 w-auto md:w-80 bg-white border shadow-xl rounded-xl z-50 max-h-[70vh] md:max-h-80 overflow-hidden flex flex-col"><div className="p-2.5 border-b bg-red-50 flex justify-between items-center"><p className="text-[11px] font-bold">⚠️ Expiry Alerts (90 days)</p><button onClick={()=>setShowExpiry(false)} className="text-[11px] bg-white border px-2.5 py-1 rounded-full">✕</button></div><div className="overflow-y-auto flex-1">{expiryNotifications.length===0? (<p className="p-4 text-[11px] text-center text-green-600">✅ No expiry</p>) : expiryNotifications.map((n, idx)=>(
+                  <div key={`${n._id}_${n.batchNo}_${n.expiryDate}_${idx}`} className={`p-2 border-b text-[10px] flex justify-between items-center ${n.status==="expired"?"bg-red-50 border-l-4 border-l-red-600":"bg-amber-50 border-l-4 border-l-amber-400"}`}>
+                    <div className="flex-1 pr-2">
+                      <div className="font-bold truncate">{n.name} {n.batchNo? `• Batch ${n.batchNo}`:""}</div>
+                      <p className="text-[9px] text-gray-500 mt-0.5">{n.company? `${n.company} • `:""}Qty {fmt(n.stock,1)} • Exp: {n.expiryDate?.slice(0,10)}</p>
+                    </div>
+                    <div className="flex flex-col gap-1 items-end">
+                      <span className={`px-1.5 py-0.5 rounded-full text-[8px] font-bold ${n.status==="expired"?"bg-red-600 text-white":"bg-amber-500 text-white"}`}>{n.status==="expired"?`EXPIRED ${Math.abs(n.daysLeft)}d`:`${n.daysLeft}d left`}</span>
+                      {n.status==="expired" && (
+                        <button onClick={()=>handleDiscard(n)} className="text-[9px] bg-red-600 text-white px-2 py-1 rounded-full font-bold hover:bg-red-700">Discard</button>
+                      )}
+                    </div>
+                  </div>
+                ))}</div></div></>)}
               </div>
               <div className="flex gap-1"><div className="bg-green-600 text-white px-2 py-1 rounded-full text-[9px] font-bold">{filter.toUpperCase()}: Rs.{fmt(total,0)}</div><div className="bg-blue-600 text-white px-2 py-1 rounded-full text-[9px] font-bold">+{fmt(profit,0)}</div>{pendingTotal>0&&<div className="bg-red-600 text-white px-2 py-1 rounded-full text-[9px] font-bold">Udhar {fmt(pendingTotal,0)}</div>}</div>
             </div>
@@ -357,25 +553,27 @@ export default function SalesPage() {
         {loadingProducts?(<div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-2">{[1,2,3,4,5,6].map(i=>(<div key={i} className="bg-white border rounded-xl p-2.5 animate-pulse"><div className="h-3 bg-gray-200 rounded w-3/4 mb-2"></div></div>))}</div>):(
           <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-2.5 mb-3">
             {products.map(p=>{
-              const calc=getSellCalc(p); const out=p.stock<=0.001; const isSelling=sellingId===p._id; 
+              const calc=getSellCalc(p); const saleable=getSaleableStock(p); const out=saleable<=0.0001;
               const buyPrice = getProductBuyPrice(p);
               const totalBuyStock = p.stock * buyPrice;
               const expiryStr = getProductExpiry(p);
               const expStatus = getExpiryStatus(expiryStr);
               const batchNoStr = getProductBatchNo(p);
-              const borderClass = expStatus==="expired" ? "border-2 border-red-500 bg-red-50/60 ring-1 ring-red-200" : expStatus==="soon" ? "border-2 border-amber-400 bg-amber-50/60 ring-1 ring-amber-200" : "border";
+              const borderClass = expStatus==="expired" && saleable<=0 ? "border-2 border-red-500 bg-red-50/60 ring-1 ring-red-200" : expStatus==="soon" ? "border-2 border-amber-400 bg-amber-50/60 ring-1 ring-amber-200" : "border";
+              const ppbSafe = p.pattaPerBox && p.pattaPerBox>0 ? p.pattaPerBox : 10;
+              const saleablePatta = p.mainUnit==="box" ? saleable*ppbSafe : saleable;
               return(
-                <div key={p._id} className={`bg-white rounded-xl p-2.5 shadow-sm hover:shadow-md transition ${borderClass} ${isSelling?"ring-2 ring-green-400":""}`}>
-                  <div className="flex justify-between gap-1"><p className="font-bold text-[11px] leading-tight truncate w-[60%]">{p.name} <span className="font-normal text-[8px] text-gray-400">{p.company}</span>{expStatus==="expired"&&<span className="ml-1 text-[8px] bg-red-600 text-white px-1.5 py-0.5 rounded animate-pulse">EXPIRED</span>}{expStatus==="soon"&&<span className="ml-1 text-[8px] bg-amber-500 text-white px-1.5 py-0.5 rounded">SOON</span>}</p><span className="text-[8px] bg-gray-100 px-1.5 py-0.5 rounded-full h-fit whitespace-nowrap">{fmt(p.stock,1)} {p.mainUnit} • TotBuy Rs.{fmt(totalBuyStock,0)}</span></div>
-                  <p className="text-[9px] text-gray-500 mt-0.5">Stk {fmt(p.stock,1)} {p.mainUnit} = Buy Rs.{fmt(buyPrice,1)} • Sell Rs.{fmt(p.sellPrice,1)} {p.rack?`• ${p.rack}`:""} {expiryStr?`• ${expiryStr.slice(0,10)}`:""} {batchNoStr?`• Batch ${batchNoStr}`:""}</p>
+                <div key={p._id} className={`bg-white rounded-xl p-2.5 shadow-sm hover:shadow-md transition ${borderClass}`}>
+                  <div className="flex justify-between gap-1"><p className="font-bold text-[11px] leading-tight truncate w-[60%]">{p.name} <span className="font-normal text-[8px] text-gray-400">{p.company}</span>{expStatus==="expired"&&saleable<=0&&<span className="ml-1 text-[8px] bg-red-600 text-white px-1.5 py-0.5 rounded animate-pulse">EXPIRED</span>}{expStatus==="soon"&&<span className="ml-1 text-[8px] bg-amber-500 text-white px-1.5 py-0.5 rounded">SOON</span>}</p><span className={`text-[8px] px-1.5 py-0.5 rounded-full h-fit whitespace-nowrap ${saleable<=0?"bg-red-600 text-white":"bg-gray-100"}`}>Saleable {p.mainUnit==="box"?`${fmt(saleablePatta,3)} patta`:fmt(saleable,3)} / {fmt(p.stock,3)} {p.mainUnit}</span></div>
+                  <p className="text-[9px] text-gray-500 mt-0.5">TotBuy Rs.{fmt(totalBuyStock,0)} • Buy Rs.{fmt(buyPrice,1)} • Sell Rs.{fmt(p.sellPrice,1)} {p.rack?`• ${p.rack}`:""} {expiryStr?`• ${expiryStr.slice(0,10)}`:""} {batchNoStr?`• Batch ${batchNoStr}`:""} ppb:{ppbSafe}</p>
                   <div className="flex bg-gray-100 rounded-full p-0.5 mt-2 w-fit gap-0.5">
                     {sellOptions(p.mainUnit).map(u=>(
                       <button key={u} onClick={()=>{ const def=getDefaultPrice(p,u as SellUnit); setSellUnitMap({...sellUnitMap,[p._id]:u as SellUnit}); setPriceMap({...priceMap,[p._id]:fmt(def,1)});}} className={`px-2.5 py-1 rounded-full text-[9px] ${calc.sellUnit===u?"bg-green-600 text-white font-bold shadow":"text-gray-600"}`}>{u}</button>
                     ))}
                   </div>
                   <div className="flex gap-1 mt-2"><input type="text" inputMode="decimal" value={priceMap[p._id]??fmt(calc.defaultPrice,1)} onFocus={e=>e.target.select()} onChange={e=>{ const v=e.target.value; if(v===""||/^[0-9]*\.?[0-9]*$/.test(v)) setPriceMap({...priceMap,[p._id]:v});}} className="flex-1 border rounded-lg px-2.5 py-1.5 text-[11px] h-9 bg-blue-50/50" placeholder={`Price ${calc.sellUnit}`}/><div className="text-[10px] bg-gray-50 border rounded-lg px-2.5 flex items-center h-9 font-bold">{calc.qty} {calc.sellUnit}</div></div>
-                  <div className="bg-gray-50 border rounded-lg px-2.5 py-1.5 mt-1.5 flex justify-between text-[10px]"><span>{fmt(calc.qty,1)} {calc.sellUnit} = -{fmt2(calc.deductMain)} {p.mainUnit}</span><span className="font-bold text-green-700">Rs.{fmt(calc.total,0)} +{fmt(calc.profit,0)}</span></div>
-                  <div className="flex gap-1.5 mt-2"><div className="flex border rounded-lg overflow-hidden h-9"><button onClick={()=>setQtyMap({...qtyMap,[p._id]:Math.max(1,(qtyMap[p._id]||1)-1)})} className="px-3 bg-gray-50 text-[14px] hover:bg-gray-100">-</button><div className="w-10 flex items-center justify-center border-x text-[11px] font-bold">{fmt(qtyMap[p._id]||1,0)}</div><button onClick={()=>setQtyMap({...qtyMap,[p._id]:(qtyMap[p._id]||1)+1})} className="px-3 bg-gray-50 text-[14px] hover:bg-gray-100">+</button></div><button onClick={()=>sell(p)} disabled={out||!!isSelling} className={`flex-1 rounded-lg text-[11px] h-9 font-bold shadow-sm transition ${out?"bg-gray-200 text-gray-500":expStatus==="expired"?"bg-red-600 hover:bg-red-700 text-white":"bg-green-600 hover:bg-green-700 text-white"}`}>{isSelling?"Selling...":paymentType==="credit"?`Udhar Rs.${fmt(calc.total,0)}`:`Sell Rs.${fmt(calc.total,0)}`}</button></div>
+                  <div className="bg-gray-50 border rounded-lg px-2.5 py-1.5 mt-1.5 flex justify-between text-[10px]"><span>{fmt(calc.qty,1)} {calc.sellUnit} = -{fmt(calc.deductMain,3)} {p.mainUnit}</span><span className="font-bold text-green-700">Rs.{fmt(calc.total,0)} +{fmt(calc.profit,0)}</span></div>
+                  <div className="flex gap-1.5 mt-2"><div className="flex border rounded-lg overflow-hidden h-9"><button onClick={()=>setQtyMap({...qtyMap,[p._id]:Math.max(1,(qtyMap[p._id]||1)-1)})} className="px-3 bg-gray-50 text-[14px] hover:bg-gray-100">-</button><div className="w-10 flex items-center justify-center border-x text-[11px] font-bold">{fmt(qtyMap[p._id]||1,0)}</div><button onClick={()=>setQtyMap({...qtyMap,[p._id]:(qtyMap[p._id]||1)+1})} className="px-3 bg-gray-50 text-[14px] hover:bg-gray-100">+</button></div><button onClick={()=>sell(p)} disabled={out} className={`flex-1 rounded-lg text-[11px] h-9 font-bold shadow-sm transition ${out?"bg-gray-200 text-gray-500":expStatus==="expired"&&saleable<=0?"bg-red-600 text-white":"bg-green-600 hover:bg-green-700 text-white active:scale-95"}`}>{out?`Expired - Discard ${fmt(p.stock,1)}`:paymentType==="credit"?`Udhar Rs.${fmt(calc.total,0)}`:`Sell Rs.${fmt(calc.total,0)}`}</button></div>
                 </div>
               );
             })}
@@ -387,7 +585,7 @@ export default function SalesPage() {
           {deletingId && <div className="absolute inset-0 bg-white/70 z-10 flex items-center justify-center"><p className="bg-red-600 text-white px-4 py-2 rounded-full text-[12px] animate-pulse">⏳ Deleting...</p></div>}
           {loadingSales?<div className="p-4 text-[11px] text-center">Loading sales...</div>:sales.length===0?<p className="p-6 text-center text-gray-400 text-[11px]">No sales {filter}</p>:sales.map(s=>(
             <div key={s._id} className={`p-2.5 border-b flex justify-between hover:bg-gray-50 ${s._id.startsWith("local_")?"bg-amber-50/50":""} ${s.status==="pending"?"bg-red-50/30":""} ${deletingId===s._id?"opacity-40":""}`}>
-              <div><p className="font-bold text-[11px]">{s.productName} {fmt(s.quantity,1)} {s.sellUnit} @ Rs.{fmt(s.sellPrice,1)} <span className="text-[9px] text-gray-500">(-{fmt2(s.deductionMain)} {s.mainUnit})</span>{s.batchNo? <span className="text-[8px] bg-amber-100 px-1 rounded ml-1">{s.batchNo}</span>:""}</p><p className="text-[9px] text-gray-400 mt-0.5">{new Date(s.createdAt).toLocaleTimeString()} {s.customerName&&s.customerName!=="Walk-in"?`👤${s.customerName}`:""}</p></div>
+              <div><p className="font-bold text-[11px]">{s.productName} {fmt(s.quantity,1)} {s.sellUnit} @ Rs.{fmt(s.sellPrice,1)} <span className="text-[9px] text-gray-500">(-{fmt(s.deductionMain,3)} {s.mainUnit})</span>{s.batchNo? <span className="text-[8px] bg-amber-100 px-1 rounded ml-1">{s.batchNo}</span>:""}</p><p className="text-[9px] text-gray-400 mt-0.5">{new Date(s.createdAt).toLocaleTimeString()} {s.customerName&&s.customerName!=="Walk-in"?`👤${s.customerName}`:""}</p></div>
               <div className="text-right"><div className="font-bold text-[11px]">Rs.{fmt(s.total,0)}</div><div className="text-[9px] text-green-600">+{fmt(s.profit,0)}</div><button onClick={()=>handleDeleteSale(s._id)} disabled={!!deletingId} className={`text-[9px] px-2.5 py-1 rounded-full mt-1 font-bold ${deletingId===s._id?"bg-gray-300 text-gray-500":"bg-red-50 text-red-600 hover:bg-red-100"}`}>{deletingId===s._id?"Deleting...":"Del"}</button></div>
             </div>
           ))}

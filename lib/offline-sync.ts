@@ -1,21 +1,34 @@
-import { offlineDB, upsertOfflineCustomer, calcDeduction } from './offline-db';
-import type { OfflineSale, MainUnit, SellUnit, WusoolHistoryEntry } from './offline-db';
+import { offlineDB, upsertOfflineCustomer, calcDeduction } from "./offline-db";
+import type { OfflineSale, MainUnit, SellUnit, WusoolHistoryEntry } from "./offline-db";
 
 export interface OfflineSaleData {
-  productId: string; productName: string; quantity: number;
-  mainUnit: MainUnit; sellUnit: SellUnit;
-  pattaPerBox: number; mlPerBottle: number;
-  buyPriceMain?: number; sellPrice: number;
-  userId: string; soldBy?: string;
-  customerName?: string; customerPhone?: string; customerVillage?: string;
-  paymentType?: string; customerId?: string;
+  productId: string;
+  productName: string;
+  quantity: number;
+  mainUnit: MainUnit;
+  sellUnit: SellUnit;
+  pattaPerBox: number;
+  mlPerBottle: number;
+  buyPriceMain?: number;
+  sellPrice: number;
+  userId: string;
+  soldBy?: string;
+  customerName?: string;
+  customerPhone?: string;
+  customerVillage?: string;
+  paymentType?: string;
+  customerId?: string;
+  batchId?: string;
+  batchNo?: string;
+  deductionMain?: number;
 }
 
 type SyncManager = { register: (tag: string) => Promise<void> };
 type SyncRegistration = ServiceWorkerRegistration & { sync: SyncManager };
 
 function isSyncRegistration(reg: ServiceWorkerRegistration): reg is SyncRegistration {
-  return 'sync' in reg && typeof (reg as { sync?: unknown }).sync === 'object';
+  const candidate = reg as unknown as { sync: SyncManager };
+  return typeof candidate.sync === "object" && candidate.sync !== null;
 }
 
 function genLocalId(): string {
@@ -26,20 +39,22 @@ export async function saveSaleOffline(saleData: OfflineSaleData): Promise<string
   const ppb = saleData.pattaPerBox || 10;
   const mlB = saleData.mlPerBottle || 120;
   const ded = calcDeduction(saleData.mainUnit, saleData.sellUnit, saleData.quantity, ppb, mlB);
-  const needMain = Math.round(ded.main*1000)/1000;
+  const needMain = Math.round(ded.main * 1000) / 1000;
 
-  // FIXED: filter expired batches - don't sell expired
-  const now = new Date();
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+
   const allBatches = await offlineDB.batches
-    .where('productId').equals(saleData.productId)
-    .filter(b => b.quantity > 0.0001 && new Date(b.expiryDate) > now)
+    .where("productId")
+    .equals(saleData.productId)
+    .filter((b) => b.quantity > 0.0001 && new Date(b.expiryDate) >= today)
     .toArray();
-  
-  allBatches.sort((a,b) => new Date(a.expiryDate).getTime() - new Date(b.expiryDate).getTime());
+
+  allBatches.sort((a, b) => new Date(a.expiryDate).getTime() - new Date(b.expiryDate).getTime());
 
   const totalBatchQty = allBatches.reduce((s, b) => s + b.quantity, 0);
   if (allBatches.length === 0 || totalBatchQty < needMain - 0.0001) {
-    throw new Error(`Only ${totalBatchQty.toFixed(2)} ${saleData.mainUnit} left (expired batches excluded)`);
+    throw new Error(`Only ${totalBatchQty.toFixed(2)} ${saleData.mainUnit} left (expired excluded)`);
   }
 
   const nowISO = new Date().toISOString();
@@ -47,20 +62,27 @@ export async function saveSaleOffline(saleData: OfflineSaleData): Promise<string
   const status: "paid" | "pending" = isCredit ? "pending" : "paid";
   const firstBatch = allBatches[0];
 
-  // FIXED: calculate single total/profit based on first batch (FIFO)
-  let total = 0; let profit = 0;
+  let total = 0;
+  let profit = 0;
   if (saleData.mainUnit === "box") {
     const buyPerPatta = firstBatch.buyPrice / ppb;
-    if (saleData.sellUnit === "patta") { total = saleData.sellPrice * saleData.quantity; profit = (saleData.sellPrice - buyPerPatta) * saleData.quantity; }
-    else if (saleData.sellUnit === "half_patta") { total = saleData.sellPrice * saleData.quantity; profit = (saleData.sellPrice - buyPerPatta/2) * saleData.quantity; }
-    else { total = saleData.sellPrice * saleData.quantity; profit = (saleData.sellPrice - firstBatch.buyPrice) * saleData.quantity; }
+    if (saleData.sellUnit === "patta") {
+      total = saleData.sellPrice * saleData.quantity;
+      profit = (saleData.sellPrice - buyPerPatta) * saleData.quantity;
+    } else if (saleData.sellUnit === "half_patta") {
+      total = saleData.sellPrice * saleData.quantity;
+      profit = (saleData.sellPrice - buyPerPatta / 2) * saleData.quantity;
+    } else {
+      total = saleData.sellPrice * saleData.quantity;
+      profit = (saleData.sellPrice - firstBatch.buyPrice) * saleData.quantity;
+    }
   } else {
-    total = saleData.sellPrice * saleData.quantity; profit = (saleData.sellPrice - firstBatch.buyPrice) * saleData.quantity;
+    total = saleData.sellPrice * saleData.quantity;
+    profit = (saleData.sellPrice - firstBatch.buyPrice) * saleData.quantity;
   }
 
   let createdId = "";
-  await offlineDB.transaction('rw', offlineDB.batches, offlineDB.sales, offlineDB.products, offlineDB.customers, offlineDB.syncQueue, async () => {
-    // FIXED: FIFO deduct across batches but create SINGLE sale doc
+  await offlineDB.transaction("rw", offlineDB.batches, offlineDB.sales, offlineDB.products, offlineDB.customers, offlineDB.syncQueue, async () => {
     let remaining = needMain;
     for (const batch of allBatches) {
       if (remaining <= 0) break;
@@ -71,32 +93,41 @@ export async function saveSaleOffline(saleData: OfflineSaleData): Promise<string
 
     const localId = genLocalId();
     createdId = localId;
+
     const newSale: OfflineSale = {
-      localId, saleId: localId,
-      productId: saleData.productId, productName: saleData.productName,
+      localId,
+      saleId: localId,
+      productId: saleData.productId,
+      productName: saleData.productName,
       batchId: firstBatch.localId,
-      batchNo: firstBatch.batchNo, expiryDate: firstBatch.expiryDate,
-      mainUnit: saleData.mainUnit, sellUnit: saleData.sellUnit,
+      batchNo: firstBatch.batchNo,
+      expiryDate: firstBatch.expiryDate,
+      mainUnit: saleData.mainUnit,
+      sellUnit: saleData.sellUnit,
       quantity: saleData.quantity,
-      pattaPerBox: ppb, mlPerBottle: mlB,
-      buyPriceMain: firstBatch.buyPrice, sellPrice: saleData.sellPrice,
-      total: Math.round(total), profit: Math.round(profit),
-      deductionMain: needMain, 
+      pattaPerBox: ppb,
+      mlPerBottle: mlB,
+      buyPriceMain: firstBatch.buyPrice,
+      sellPrice: saleData.sellPrice,
+      total: Math.round(total),
+      profit: Math.round(profit),
+      deductionMain: needMain,
       deductionPatta: ded.patta,
-      userId: saleData.userId, createdAt: nowISO, synced: 0,
-      customerName: saleData.customerName ?? 'Walk-in',
-      normalizedCustomerName: (saleData.customerName ?? 'Walk-in').trim().toLowerCase(),
-      paymentType: isCredit ? "credit" : (saleData.paymentType ?? 'cash'),
+      userId: saleData.userId,
+      createdAt: nowISO,
+      synced: 0,
+      customerName: saleData.customerName ?? "Walk-in",
+      normalizedCustomerName: (saleData.customerName ?? "Walk-in").trim().toLowerCase(),
+      paymentType: isCredit ? "credit" : saleData.paymentType ?? "cash",
       customerId: saleData.customerId,
-      status, isCredit,
+      status,
+      isCredit,
     };
 
     await offlineDB.sales.put(newSale);
-    await offlineDB.syncQueue.add({ type: 'sale', localId, payload: newSale, createdAt: new Date(), attempts: 0 });
+    await offlineDB.syncQueue.add({ type: "sale", localId, payload: newSale, createdAt: new Date(), attempts: 0 });
 
-    // FIXED: don't update Product.stock - stock = SUM(batches) recalculated on GET, prevents 25 bug
-    // only update lastSynced
-    const prod = await offlineDB.products.where('_id').equals(saleData.productId).or('localId').equals(saleData.productId).first();
+    const prod = await offlineDB.products.where("_id").equals(saleData.productId).or("localId").equals(saleData.productId).first();
     if (prod) {
       await offlineDB.products.update(prod.localId, { synced: 0 });
     }
@@ -105,15 +136,19 @@ export async function saveSaleOffline(saleData: OfflineSaleData): Promise<string
       try {
         const customerLocalId = await upsertOfflineCustomer(newSale, saleData.customerVillage ?? "", saleData.customerPhone ?? "");
         if (customerLocalId) await offlineDB.sales.update(localId, { customerId: customerLocalId });
-      } catch {}
+      } catch {
+        // ignore khata error offline
+      }
     }
   });
 
-  if (typeof window !== 'undefined' && 'serviceWorker' in navigator && 'SyncManager' in window) {
+  if (typeof window !== "undefined" && "serviceWorker" in navigator) {
     try {
       const reg = await navigator.serviceWorker.ready;
-      if (isSyncRegistration(reg)) await reg.sync.register('sync-sales');
-    } catch {}
+      if (isSyncRegistration(reg)) await reg.sync.register("sync-sales");
+    } catch {
+      // ignore
+    }
   }
   return [createdId];
 }
@@ -128,74 +163,116 @@ export async function wusoolOffline(customerLocalId: string, amount: number, not
   const existingHistory = customer.wusoolHistory ?? [];
   if (newUdhar <= 0) {
     await offlineDB.customers.update(customerLocalId, {
-      totalUdhar: 0, isPaid: true, paidAmount: customer.totalBusiness,
-      lastWusoolDate: now, wusoolHistory: [...existingHistory, entry], synced: 0,
+      totalUdhar: 0,
+      isPaid: true,
+      paidAmount: customer.totalBusiness,
+      lastWusoolDate: now,
+      wusoolHistory: [...existingHistory, entry],
+      synced: 0,
     });
-    for (const sId of customer.saleIds ?? []) await offlineDB.sales.update(sId, { status: "paid", isCredit: false }).catch(() => {});
+    for (const sId of customer.saleIds ?? []) {
+      await offlineDB.sales.update(sId, { status: "paid", isCredit: false }).catch(() => {
+        // ignore
+      });
+    }
   } else {
     await offlineDB.customers.update(customerLocalId, {
-      totalUdhar: newUdhar, paidAmount: (customer.paidAmount ?? 0) + paid,
-      lastWusoolDate: now, wusoolHistory: [...existingHistory, entry], synced: 0,
+      totalUdhar: newUdhar,
+      paidAmount: (customer.paidAmount ?? 0) + paid,
+      lastWusoolDate: now,
+      wusoolHistory: [...existingHistory, entry],
+      synced: 0,
     });
   }
-  await offlineDB.syncQueue.add({ type: 'wusool', localId: customerLocalId, payload: { amount: paid, note, date: now }, createdAt: new Date(), attempts: 0 });
+  await offlineDB.syncQueue.add({ type: "wusool", localId: customerLocalId, payload: { amount: paid, note, date: now }, createdAt: new Date(), attempts: 0 });
   return true;
 }
 
 export async function syncOfflineSales(): Promise<{ synced: number; failed: number }> {
-  if (typeof window === 'undefined' || !navigator.onLine) return { synced: 0, failed: 0 };
-  const unsynced = await offlineDB.sales.where('synced').equals(0).toArray();
-  let synced = 0; let failed = 0;
+  if (typeof window === "undefined" || !navigator.onLine) return { synced: 0, failed: 0 };
+  const unsynced = await offlineDB.sales.where("synced").equals(0).toArray();
+  let synced = 0;
+  let failed = 0;
   for (const sale of unsynced) {
     try {
-      const res = await fetch('/api/sales', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+      const res = await fetch("/api/sales", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           productId: sale.productId,
-          batchId: sale.batchId, batchNo: sale.batchNo, expiryDate: sale.expiryDate,
-          mainUnit: sale.mainUnit, sellUnit: sale.sellUnit,
+          batchId: sale.batchId,
+          batchNo: sale.batchNo,
+          expiryDate: sale.expiryDate,
+          mainUnit: sale.mainUnit,
+          sellUnit: sale.sellUnit,
           quantity: sale.quantity,
-          pattaPerBox: sale.pattaPerBox, mlPerBottle: sale.mlPerBottle,
-          buyPriceMain: sale.buyPriceMain, sellPrice: sale.sellPrice,
-          total: sale.total, profit: sale.profit,
-          deductionMain: sale.deductionMain, deductionPatta: sale.deductionPatta,
+          pattaPerBox: sale.pattaPerBox,
+          mlPerBottle: sale.mlPerBottle,
+          buyPriceMain: sale.buyPriceMain,
+          sellPrice: sale.sellPrice,
+          total: sale.total,
+          profit: sale.profit,
+          deductionMain: sale.deductionMain,
+          deductionPatta: sale.deductionPatta,
           localId: sale.localId,
           customerName: sale.customerName ?? "Walk-in",
           paymentType: sale.paymentType ?? "cash",
         }),
       });
-      if (res.ok) { await offlineDB.sales.update(sale.localId, { synced: 1 }); synced++; } else failed++;
-    } catch { failed++; }
+      if (res.ok) {
+        await offlineDB.sales.update(sale.localId, { synced: 1 });
+        synced++;
+      } else {
+        failed++;
+      }
+    } catch {
+      failed++;
+    }
   }
   return { synced, failed };
 }
 
 export async function syncOfflinePurchases(): Promise<{ synced: number; failed: number }> {
-  if (typeof window === 'undefined' || !navigator.onLine) return { synced: 0, failed: 0 };
-  const unsynced = await offlineDB.purchases.where('synced').equals(0).toArray();
-  let synced = 0; let failed = 0;
+  if (typeof window === "undefined" || !navigator.onLine) return { synced: 0, failed: 0 };
+  const unsynced = await offlineDB.purchases.where("synced").equals(0).toArray();
+  let synced = 0;
+  let failed = 0;
   for (const pur of unsynced) {
     try {
-      const res = await fetch('/api/purchases', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+      const res = await fetch("/api/purchases", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          supplier: pur.supplier, invoiceNo: pur.invoiceNo, totalBuyAmount: pur.totalBuyAmount,
-          items: pur.items, paymentType: pur.paymentType, localId: pur.localId, createdAt: pur.createdAt,
+          supplier: pur.supplier,
+          invoiceNo: pur.invoiceNo,
+          totalBuyAmount: pur.totalBuyAmount,
+          items: pur.items,
+          paymentType: pur.paymentType,
+          localId: pur.localId,
+          createdAt: pur.createdAt,
         }),
       });
-      if (res.ok) { await offlineDB.purchases.update(pur.localId, { synced: 1 }); synced++; } else failed++;
-    } catch { failed++; }
+      if (res.ok) {
+        await offlineDB.purchases.update(pur.localId, { synced: 1 });
+        synced++;
+      } else {
+        failed++;
+      }
+    } catch {
+      failed++;
+    }
   }
   return { synced, failed };
 }
 
 export async function syncAllOffline(): Promise<{ sales: number; purchases: number }> {
-  const s = await syncOfflineSales(); const p = await syncOfflinePurchases();
+  const s = await syncOfflineSales();
+  const p = await syncOfflinePurchases();
   return { sales: s.synced, purchases: p.synced };
 }
 
-if (typeof window !== 'undefined') {
-  window.addEventListener('online', () => { void syncAllOffline(); });
+if (typeof window !== "undefined") {
+  window.addEventListener("online", () => {
+    void syncAllOffline();
+  });
 }

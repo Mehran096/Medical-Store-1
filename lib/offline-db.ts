@@ -1,8 +1,8 @@
-import Dexie, { Table } from 'dexie';
+import Dexie, { type Table } from "dexie";
 
 export type MainUnit = "box" | "bottle" | "tube" | "piece";
 export type SellUnit = "patta" | "half_patta" | "box" | "bottle" | "ml" | "tube" | "piece";
-export type WusoolHistoryEntry = { amount: number; date: string; note?: string; }
+export type WusoolHistoryEntry = { amount: number; date: string; note?: string; };
 export type WusoolSyncPayload = { amount: number; note?: string; date: string; };
 
 export interface OfflineBatch {
@@ -19,12 +19,12 @@ export interface OfflineBatch {
 }
 
 export interface OfflineProduct {
-  _id?: string; 
-  localId: string; 
-  name: string; 
-  company: string; 
+  _id?: string;
+  localId: string;
+  name: string;
+  company: string;
   generic: string;
-  barcode?: string; 
+  barcode?: string;
   rack?: string;
   mainUnit: MainUnit;
   pattaPerBox: number;
@@ -32,39 +32,39 @@ export interface OfflineProduct {
   sellPrice: number;
   stock: number;
   buyPriceAvg?: number;
-  userId: string; 
-  synced: number; 
-  createdAt?: string; 
+  userId: string;
+  synced: number;
+  createdAt?: string;
   lastSyncedAt?: string;
 }
 
 export interface OfflineSale {
-  localId: string; 
-  productId: string; 
+  localId: string;
+  productId: string;
   productName: string;
   batchId?: string;
   batchNo?: string;
   expiryDate?: string;
-  mainUnit: MainUnit; 
+  mainUnit: MainUnit;
   sellUnit: SellUnit;
   quantity: number;
-  pattaPerBox: number; 
+  pattaPerBox: number;
   mlPerBottle: number;
-  buyPriceMain: number; 
+  buyPriceMain: number;
   sellPrice: number;
-  total: number; 
+  total: number;
   profit: number;
-  deductionMain: number; 
+  deductionMain: number;
   deductionPatta: number;
-  userId: string; 
-  createdAt: string; 
+  userId: string;
+  createdAt: string;
   synced: number;
-  customerName?: string; 
+  customerName?: string;
   normalizedCustomerName?: string;
-  paymentType?: string; 
-  status?: "paid" | "pending" | "partial"; 
+  paymentType?: string;
+  status?: "paid" | "pending" | "partial";
   isCredit?: boolean;
-  customerId?: string; 
+  customerId?: string;
   saleId?: string;
 }
 
@@ -96,18 +96,35 @@ export interface OfflinePurchase {
 }
 
 export interface OfflineCustomer {
-  localId: string; _id?: string; saleIds: string[]; name: string; normalizedName: string;
-  phone?: string; village?: string; totalUdhar: number; totalBusiness: number;
-  lastUdharDate?: string; lastWusoolDate?: string; paidAt?: string;
-  synced: number; createdAt?: string; billsCount: number;
-  isPaid?: boolean; paidAmount?: number; wusoolHistory?: WusoolHistoryEntry[];
+  localId: string;
+  _id?: string;
+  saleIds: string[];
+  name: string;
+  normalizedName: string;
+  phone?: string;
+  village?: string;
+  totalUdhar: number;
+  totalBusiness: number;
+  lastUdharDate?: string;
+  lastWusoolDate?: string;
+  paidAt?: string;
+  synced: number;
+  createdAt?: string;
+  billsCount: number;
+  isPaid?: boolean;
+  paidAmount?: number;
+  wusoolHistory?: WusoolHistoryEntry[];
 }
 
 export type OfflinePayload = OfflineSale | OfflineProduct | OfflineCustomer | WusoolSyncPayload | OfflinePurchase | OfflineBatch;
 
 export interface SyncQueueItem {
-  id?: number; type: 'sale' | 'product' | 'customer' | 'wusool' | 'purchase' | 'batch';
-  localId: string; payload: OfflinePayload; createdAt: Date; attempts: number;
+  id?: number;
+  type: "sale" | "product" | "customer" | "wusool" | "purchase" | "batch";
+  localId: string;
+  payload: OfflinePayload;
+  createdAt: Date;
+  attempts: number;
 }
 
 export class OfflineDB extends Dexie {
@@ -119,14 +136,14 @@ export class OfflineDB extends Dexie {
   syncQueue!: Table<SyncQueueItem, number>;
 
   constructor() {
-    super('YasirMedicalOfflineV16');
+    super("YasirMedicalOfflineV16");
     this.version(18).stores({
-      products: 'localId, _id, userId, synced, name, mainUnit',
-      batches: 'localId, _id, productId, userId, synced, expiryDate, batchNo, quantity',
-      sales: 'localId, productId, batchId, userId, synced, createdAt, customerName, status',
-      purchases: 'localId, _id, userId, synced, createdAt, supplier',
-      customers: 'localId, _id, name, normalizedName, totalUdhar, synced',
-      syncQueue: '++id, type, localId, createdAt'
+      products: "localId, _id, userId, synced, name, mainUnit",
+      batches: "localId, _id, productId, userId, synced, expiryDate, batchNo, quantity",
+      sales: "localId, productId, batchId, userId, synced, createdAt, customerName, status",
+      purchases: "localId, _id, userId, synced, createdAt, supplier",
+      customers: "localId, _id, name, normalizedName, totalUdhar, synced",
+      syncQueue: "++id, type, localId, createdAt",
     });
   }
 }
@@ -146,21 +163,22 @@ export function calcDeduction(main: MainUnit, sell: SellUnit, qty: number, ppb: 
   return { main: qty, patta: 0 };
 }
 
-export async function getExpiringBatches(userId: string, days = 90) {
+export async function getExpiringBatches(userId: string, days = 90): Promise<OfflineBatch[]> {
   const limitDate = new Date();
   limitDate.setDate(limitDate.getDate() + days);
   const limitISO = limitDate.toISOString();
   const all = await offlineDB.batches
-    .where('userId').equals(userId)
-    .filter(b => b.expiryDate <= limitISO && b.quantity > 0.0001)
-    .sortBy('expiryDate');
-  
+    .where("userId")
+    .equals(userId)
+    .filter((b) => b.expiryDate <= limitISO && b.quantity > 0.0001)
+    .sortBy("expiryDate");
+
   const map = new Map<string, OfflineBatch>();
   for (const b of all) {
-    const key = `${b.productId}_${b.batchNo.trim().toLowerCase()}_${b.expiryDate.slice(0,10)}`;
+    const key = `${b.productId}_${b.batchNo.trim().toLowerCase()}_${b.expiryDate.slice(0, 10)}`;
     const prev = map.get(key);
     if (!prev) map.set(key, b);
-    else map.set(key, { ...prev, quantity: Math.round((prev.quantity + b.quantity)*1000)/1000 });
+    else map.set(key, { ...prev, quantity: Math.round((prev.quantity + b.quantity) * 1000) / 1000 });
   }
   return Array.from(map.values());
 }
@@ -174,38 +192,45 @@ export async function addOfflinePurchase(
 ): Promise<string> {
   const totalBuyAmount = items.reduce((sum, it) => sum + it.quantity * it.buyPricePerUnit, 0);
   const localId = `pur_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
-  
+
   const purchase: OfflinePurchase = {
-    localId, supplier, invoiceNo, totalBuyAmount, totalItems: items.length,
-    items: items.map(it => ({ ...it, batchNo: String(it.batchNo).trim(), totalBuy: it.quantity * it.buyPricePerUnit })),
-    paymentType, userId, createdAt: new Date().toISOString(), synced: 0,
+    localId,
+    supplier,
+    invoiceNo,
+    totalBuyAmount,
+    totalItems: items.length,
+    items: items.map((it) => ({ ...it, batchNo: String(it.batchNo).trim(), totalBuy: it.quantity * it.buyPricePerUnit })),
+    paymentType,
+    userId,
+    createdAt: new Date().toISOString(),
+    synced: 0,
   };
-  
-  await offlineDB.transaction('rw', offlineDB.purchases, offlineDB.batches, offlineDB.products, offlineDB.syncQueue, async () => {
+
+  await offlineDB.transaction("rw", offlineDB.purchases, offlineDB.batches, offlineDB.products, offlineDB.syncQueue, async () => {
     await offlineDB.purchases.add(purchase);
 
     const agg = new Map<string, OfflinePurchaseItem>();
-    for(const it of items){
+    for (const it of items) {
       const key = `${it.productId}_${String(it.batchNo).trim().toLowerCase()}`;
       const prev = agg.get(key);
-      if(prev) agg.set(key, { ...prev, quantity: prev.quantity + it.quantity });
+      if (prev) agg.set(key, { ...prev, quantity: prev.quantity + it.quantity });
       else agg.set(key, { ...it, batchNo: String(it.batchNo).trim() });
     }
 
     for (const item of agg.values()) {
       const trimmed = String(item.batchNo).trim();
       const lower = trimmed.toLowerCase();
-      
-      const allForProduct = await offlineDB.batches.where('productId').equals(item.productId).toArray();
-      const existing = allForProduct.find(b => b.batchNo.trim().toLowerCase() === lower && b.userId === userId);
+
+      const allForProduct = await offlineDB.batches.where("productId").equals(item.productId).toArray();
+      const existing = allForProduct.find((b) => b.batchNo.trim().toLowerCase() === lower && b.userId === userId);
 
       if (existing) {
         const newQty = Math.round((existing.quantity + item.quantity) * 1000) / 1000;
-        await offlineDB.batches.update(existing.localId, { 
+        await offlineDB.batches.update(existing.localId, {
           quantity: newQty,
           expiryDate: item.expiryDate,
           buyPrice: item.buyPricePerUnit,
-          synced: 0
+          synced: 0,
         });
       } else {
         const batchLocalId = `batch_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
@@ -215,21 +240,30 @@ export async function addOfflinePurchase(
           batchNo: trimmed,
           expiryDate: item.expiryDate,
           buyPrice: item.buyPricePerUnit,
-          quantity: Math.round(item.quantity*1000)/1000,
-          userId, synced: 0, createdAt: new Date().toISOString()
+          quantity: Math.round(item.quantity * 1000) / 1000,
+          userId,
+          synced: 0,
+          createdAt: new Date().toISOString(),
         };
         await offlineDB.batches.add(batch);
       }
 
-      const prod = await offlineDB.products.where('_id').equals(item.productId).or('localId').equals(item.productId).first();
+      // FIXED: Recalc product stock = sum of batches
+      const batchesForProduct = await offlineDB.batches.where("productId").equals(item.productId).toArray();
+      const sum = batchesForProduct.reduce((s, b) => s + b.quantity, 0);
+      const prod = await offlineDB.products.where("_id").equals(item.productId).or("localId").equals(item.productId).first();
       if (prod) {
         const currentStock = prod.stock || 0;
         const newStockForAvg = currentStock + item.quantity;
-        const newAvg = prod.buyPriceAvg ? ((prod.buyPriceAvg * currentStock) + (item.buyPricePerUnit * item.quantity)) / newStockForAvg : item.buyPricePerUnit;
-        await offlineDB.products.update(prod.localId, { buyPriceAvg: Math.round(newAvg*100)/100, synced: 0 });
+        const newAvg = prod.buyPriceAvg ? (prod.buyPriceAvg * currentStock + item.buyPricePerUnit * item.quantity) / newStockForAvg : item.buyPricePerUnit;
+        await offlineDB.products.update(prod.localId, {
+          stock: Math.round(sum * 1000) / 1000,
+          buyPriceAvg: Math.round(newAvg * 100) / 100,
+          synced: 0,
+        });
       }
     }
-    await offlineDB.syncQueue.add({ type: 'purchase', localId, payload: purchase, createdAt: new Date(), attempts: 0 });
+    await offlineDB.syncQueue.add({ type: "purchase", localId, payload: purchase, createdAt: new Date(), attempts: 0 });
   });
   return localId;
 }
@@ -247,32 +281,56 @@ export async function upsertOfflineCustomer(sale: OfflineSale, village = "", pho
       saleIds: [...(existing.saleIds || []), sale.localId],
       billsCount: (existing.billsCount || 1) + 1,
       lastUdharDate: new Date().toISOString(),
-      synced: 0
+      synced: 0,
     });
     return existing.localId;
   } else {
     const localId = `cust_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
     await offlineDB.customers.add({
-      localId, saleIds: [sale.localId], name, normalizedName: normalized,
-      phone, village, totalUdhar: Math.round(sale.total), totalBusiness: Math.round(sale.total),
-      lastUdharDate: new Date().toISOString(), synced: 0, createdAt: new Date().toISOString(),
-      billsCount: 1, isPaid: false, paidAmount: 0, wusoolHistory: [],
+      localId,
+      saleIds: [sale.localId],
+      name,
+      normalizedName: normalized,
+      phone,
+      village,
+      totalUdhar: Math.round(sale.total),
+      totalBusiness: Math.round(sale.total),
+      lastUdharDate: new Date().toISOString(),
+      synced: 0,
+      createdAt: new Date().toISOString(),
+      billsCount: 1,
+      isPaid: false,
+      paidAmount: 0,
+      wusoolHistory: [],
     });
     return localId;
   }
 }
 
-export async function addOfflineWusool(customerLocalId: string, amount: number, note = "") {
+export async function addOfflineWusool(customerLocalId: string, amount: number, note = ""): Promise<WusoolHistoryEntry | null> {
   const customer = await offlineDB.customers.get(customerLocalId);
   if (!customer) return null;
   const paid = Math.round(amount);
   const newUdhar = Math.round((customer.totalUdhar || 0) - paid);
-  const entry = { amount: paid, date: new Date().toISOString(), note };
+  const entry: WusoolHistoryEntry = { amount: paid, date: new Date().toISOString(), note };
   if (newUdhar <= 0) {
-    await offlineDB.customers.update(customerLocalId, { totalUdhar: 0, isPaid: true, paidAmount: customer.totalBusiness, lastWusoolDate: entry.date, wusoolHistory: [...(customer.wusoolHistory || []), entry], synced: 0 });
+    await offlineDB.customers.update(customerLocalId, {
+      totalUdhar: 0,
+      isPaid: true,
+      paidAmount: customer.totalBusiness,
+      lastWusoolDate: entry.date,
+      wusoolHistory: [...(customer.wusoolHistory || []), entry],
+      synced: 0,
+    });
   } else {
-    await offlineDB.customers.update(customerLocalId, { totalUdhar: newUdhar, paidAmount: (customer.paidAmount || 0) + paid, lastWusoolDate: entry.date, wusoolHistory: [...(customer.wusoolHistory || []), entry], synced: 0 });
+    await offlineDB.customers.update(customerLocalId, {
+      totalUdhar: newUdhar,
+      paidAmount: (customer.paidAmount || 0) + paid,
+      lastWusoolDate: entry.date,
+      wusoolHistory: [...(customer.wusoolHistory || []), entry],
+      synced: 0,
+    });
   }
-  await offlineDB.syncQueue.add({ type: 'wusool', localId: customerLocalId, payload: { amount: paid, note, date: entry.date }, createdAt: new Date(), attempts: 0 });
+  await offlineDB.syncQueue.add({ type: "wusool", localId: customerLocalId, payload: { amount: paid, note, date: entry.date }, createdAt: new Date(), attempts: 0 });
   return entry;
 }
