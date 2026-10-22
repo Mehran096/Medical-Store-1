@@ -211,10 +211,12 @@ export async function POST(req: NextRequest) {
         isCredit: body.paymentType === "credit" || body.paymentType === "udhar",
       });
       await Batch.updateOne({ _id: batch._id, userId: userObjectId }, { $inc: { quantity: -Number(body.deductionMain) } });
+      // V26 CLAMP NEGATIVE
+      await Batch.updateMany({ productId: productObjectId, userId: userObjectId, quantity: { $lt: 0.02, $gt: -5 } }, { $set: { quantity: 0 } });
       const remaining = await Batch.find({ productId: productObjectId, userId: userObjectId, quantity: { $gt: 0.0001 } });
       const sum = remaining.reduce((s, b) => s + b.quantity, 0);
       const first = remaining.sort((a, b) => new Date(a.expiryDate).getTime() - new Date(b.expiryDate).getTime())[0];
-      await Product.updateOne({ _id: productObjectId, userId: userObjectId }, { $set: { stock: Math.round(sum * 1000) / 1000, nearestExpiry: first?.expiryDate, expiryDate: first?.expiryDate, batchNo: first?.batchNo } });
+      await Product.updateOne({ _id: productObjectId, userId: userObjectId }, { $set: { stock: Math.max(0, Math.round(sum * 1000) / 1000), nearestExpiry: first?.expiryDate, expiryDate: first?.expiryDate, batchNo: first?.batchNo } });
       return NextResponse.json(sale, { status: 201 });
     }
 
@@ -229,7 +231,7 @@ export async function POST(req: NextRequest) {
 
     const saleableQty = allBatches.reduce((s, b) => s + b.quantity, 0);
 
-    // V24 FINAL - fixes 0.5 patta ghost (0.157 box = 0.471 patta rounded to 0.5)
+    // V26 - fixes 0.5 patta ghost + EPS
     const saleablePattaRaw = mainUnit === "box" ? saleableQty * ppb : saleableQty;
     let needPattaRaw = quantity;
     if (mainUnit === "box") {
@@ -284,11 +286,12 @@ export async function POST(req: NextRequest) {
     for (const { batchId, take } of usedBatches) {
       await Batch.updateOne({ _id: batchId, userId: userObjectId }, { $inc: { quantity: -take } });
     }
+    await Batch.updateMany({ productId: productObjectId, userId: userObjectId, quantity: { $lt: 0.02, $gt: -5 } }, { $set: { quantity: 0 } });
 
     const remainingBatches = await Batch.find({ productId: productObjectId, userId: userObjectId, quantity: { $gt: 0.0001 } });
     const sum = remainingBatches.reduce((s, b) => s + b.quantity, 0);
     const nextEarliest = remainingBatches.sort((a, b) => new Date(a.expiryDate).getTime() - new Date(b.expiryDate).getTime())[0];
-    await Product.updateOne({ _id: productObjectId, userId: userObjectId }, { $set: { stock: Math.round(sum * 1000) / 1000, nearestExpiry: nextEarliest?.expiryDate, expiryDate: nextEarliest?.expiryDate, batchNo: nextEarliest?.batchNo } });
+    await Product.updateOne({ _id: productObjectId, userId: userObjectId }, { $set: { stock: Math.max(0, Math.round(sum * 1000) / 1000), nearestExpiry: nextEarliest?.expiryDate, expiryDate: nextEarliest?.expiryDate, batchNo: nextEarliest?.batchNo } });
 
     if (isCredit) {
       try {

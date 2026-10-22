@@ -132,7 +132,7 @@ export default function SalesPage() {
     const ppb=p.pattaPerBox||10; 
     if(p.mainUnit==="box"){ 
       if(u==="patta") return p.sellPrice; 
-      if(u==="half_patta") return Math.round((p.sellPrice/2)*10)/10; 
+      if(u==="half_patta") return Math.round((p.sellPrice/2)*100)/100; 
       if(u==="box") return Math.round(p.sellPrice*ppb*10)/10; 
     } 
     return Math.round(p.sellPrice*10)/10; 
@@ -299,7 +299,7 @@ export default function SalesPage() {
     const calc = getSellCalc(p);
     const ppb = p.pattaPerBox && p.pattaPerBox > 0 ? p.pattaPerBox : 10;
 
-    // V25 FINAL - half_patta ghost fix
+    // V26 FINAL
     const saleablePattaRaw = p.mainUnit === "box" ? saleableStock * ppb : saleableStock;
     let needPattaRaw = calc.qty;
     if (p.mainUnit === "box") {
@@ -326,13 +326,13 @@ export default function SalesPage() {
         prod._id === p._id
           ? {
               ...prod,
-              stock: Math.round((prod.stock - calc.deductMain) * 1000) / 1000,
-              batches: prod.batches?.map((b) => ({ ...b, quantity: b.batchNo === batchNo ? Math.max(0, Math.round((b.quantity - calc.deductMain)*1000)/1000) : b.quantity })),
+              stock: (() => { const ns = prod.stock - calc.deductMain; return ns < 0.02 ? 0 : Math.round(ns*1000)/1000; })(),
+              batches: prod.batches?.map((b) => ({ ...b, quantity: b.batchNo === batchNo ? (()=>{ const nq = b.quantity - calc.deductMain; return nq < 0.02 ? 0 : Math.max(0, Math.round(nq*1000)/1000); })() : b.quantity })),
             }
           : prod
       )
     );
-    setExpiryProducts((prev) => prev.map((prod) => (prod.productId === p._id ? { ...prod, stock: Math.round((prod.stock - calc.deductMain) * 1000) / 1000 } : prod)));
+    setExpiryProducts((prev) => prev.map((prod) => (prod.productId === p._id ? { ...prod, stock: (()=>{ const ns = prod.stock - calc.deductMain; return ns < 0.02 ? 0 : Math.round(ns*1000)/1000; })() } : prod)));
 
     const optimistic: Sale = {
       _id: generateLocalId(),
@@ -507,7 +507,7 @@ export default function SalesPage() {
         <div className="max-w-7xl mx-auto flex flex-col gap-1.5">
           <div className="flex flex-wrap justify-between items-center gap-1">
             <div className="flex flex-wrap gap-2 items-center">
-              <h1 className="text-[11px] font-bold">💊 V25 FIXED {isOffline?"📶 Offline":""}</h1>
+              <h1 className="text-[11px] font-bold">💊 V26 FIXED {isOffline?"📶 Offline":""}</h1>
               {lastBill && (
                 <div className="flex gap-1">
                   <button onClick={()=>setShowPrint(true)} className="bg-green-600 hover:bg-green-700 text-white px-3 py-1.5 rounded-full text-[10px] font-bold animate-pulse shadow">🖨️ Print Bill ({lastBill.items.length} • Rs.{fmt(lastBill.total,0)})</button>
@@ -568,12 +568,12 @@ export default function SalesPage() {
                   <p className="text-[9px] text-gray-500 mt-0.5">TotBuy Rs.{fmt(totalBuyStock,0)} • Buy Rs.{fmt(buyPrice,1)} • Sell Rs.{fmt(p.sellPrice,1)} {p.rack?`• ${p.rack}`:""} {expiryStr?`• ${expiryStr.slice(0,10)}`:""} {batchNoStr?`• Batch ${batchNoStr}`:""} ppb:{ppbSafe}</p>
                   <div className="flex bg-gray-100 rounded-full p-0.5 mt-2 w-fit gap-0.5">
                     {sellOptions(p.mainUnit).map(u=>(
-                      <button key={u} onClick={()=>{ const def=getDefaultPrice(p,u as SellUnit); setSellUnitMap({...sellUnitMap,[p._id]:u as SellUnit}); setPriceMap({...priceMap,[p._id]:fmt(def,1)});}} className={`px-2.5 py-1 rounded-full text-[9px] ${calc.sellUnit===u?"bg-green-600 text-white font-bold shadow":"text-gray-600"}`}>{u}</button>
+                      <button key={u} onClick={()=>{ const def=getDefaultPrice(p,u as SellUnit); setSellUnitMap({...sellUnitMap,[p._id]:u as SellUnit}); setPriceMap({...priceMap,[p._id]:fmt(def,2)});}} className={`px-2.5 py-1 rounded-full text-[9px] ${calc.sellUnit===u?"bg-green-600 text-white font-bold shadow":"text-gray-600"}`}>{u}</button>
                     ))}
                   </div>
-                  <div className="flex gap-1 mt-2"><input type="text" inputMode="decimal" value={priceMap[p._id]??fmt(calc.defaultPrice,1)} onFocus={e=>e.target.select()} onChange={e=>{ const v=e.target.value; if(v===""||/^[0-9]*\.?[0-9]*$/.test(v)) setPriceMap({...priceMap,[p._id]:v});}} className="flex-1 border rounded-lg px-2.5 py-1.5 text-[11px] h-9 bg-blue-50/50" placeholder={`Price ${calc.sellUnit}`}/><div className="text-[10px] bg-gray-50 border rounded-lg px-2.5 flex items-center h-9 font-bold">{calc.qty} {calc.sellUnit}</div></div>
+                  <div className="flex gap-1 mt-2"><input type="text" inputMode="decimal" value={priceMap[p._id]??fmt(calc.defaultPrice,2)} onFocus={e=>e.target.select()} onChange={e=>{ const v=e.target.value; if(v===""||/^[0-9]*\.?[0-9]*$/.test(v)) setPriceMap({...priceMap,[p._id]:v});}} className="flex-1 border rounded-lg px-2.5 py-1.5 text-[11px] h-9 bg-blue-50/50" placeholder={`Price ${calc.sellUnit}`}/><div className="text-[10px] bg-gray-50 border rounded-lg px-2.5 flex items-center h-9 font-bold">{calc.qty} {calc.sellUnit}</div></div>
                   <div className="bg-gray-50 border rounded-lg px-2.5 py-1.5 mt-1.5 flex justify-between text-[10px]"><span>{fmt(calc.qty,1)} {calc.sellUnit} = -{fmt(calc.deductMain,3)} {p.mainUnit}</span><span className="font-bold text-green-700">Rs.{fmt(calc.total,0)} +{fmt(calc.profit,0)}</span></div>
-                  <div className="flex gap-1.5 mt-2"><div className="flex border rounded-lg overflow-hidden h-9"><button onClick={()=>setQtyMap({...qtyMap,[p._id]:Math.max(1,(qtyMap[p._id]||1)-1)})} className="px-3 bg-gray-50 text-[14px] hover:bg-gray-100">-</button><div className="w-10 flex items-center justify-center border-x text-[11px] font-bold">{fmt(qtyMap[p._id]||1,0)}</div><button onClick={()=>setQtyMap({...qtyMap,[p._id]:(qtyMap[p._id]||1)+1})} className="px-3 bg-gray-50 text-[14px] hover:bg-gray-100">+</button></div><button onClick={()=>sell(p)} disabled={out} className={`flex-1 rounded-lg text-[11px] h-9 font-bold shadow-sm transition ${out?"bg-gray-200 text-gray-500":expStatus==="expired"&&saleable<=0?"bg-red-600 text-white":"bg-green-600 hover:bg-green-700 text-white active:scale-95"}`}>{out?`Expired - Discard ${fmt(p.stock,1)}`:paymentType==="credit"?`Udhar Rs.${fmt(calc.total,0)}`:`Sell Rs.${fmt(calc.total,0)}`}</button></div>
+                  <div className="flex gap-1.5 mt-2"><div className="flex border rounded-lg overflow-hidden h-9"><button onClick={()=>setQtyMap({...qtyMap,[p._id]:Math.max(1,(qtyMap[p._id]||1)-1)})} className="px-3 bg-gray-50 text-[14px] hover:bg-gray-100">-</button><div className="w-10 flex items-center justify-center border-x text-[11px] font-bold">{fmt(qtyMap[p._id]||1,0)}</div><button onClick={()=>setQtyMap({...qtyMap,[p._id]:(qtyMap[p._id]||1)+1})} className="px-3 bg-gray-50 text-[14px] hover:bg-gray-100">+</button></div><button onClick={()=>sell(p)} disabled={out} className={`flex-1 rounded-lg text-[11px] h-9 font-bold shadow-sm transition ${out?"bg-gray-200 text-gray-500":expStatus==="expired"&&saleable<=0?"bg-red-600 text-white":"bg-green-600 hover:bg-green-700 text-white active:scale-95"}`}>{out?`Out of Stock`:paymentType==="credit"?`Udhar Rs.${fmt(calc.total,0)}`:`Sell Rs.${fmt(calc.total,0)}`}</button></div>
                 </div>
               );
             })}
