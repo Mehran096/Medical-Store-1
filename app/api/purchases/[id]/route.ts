@@ -11,15 +11,18 @@ export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
 type RouteParams = { params: Promise<{ id: string }> };
-type UpdateBody = { supplier?: string; invoiceNo?: string; paymentType?: "cash" | "credit"; };
-type UpdateSet = { supplier?: string; invoiceNo?: string; paymentType?: "cash" | "credit"; };
-type PurchaseItemDoc = { productId?: Types.ObjectId; quantity?: number; batchNo?: string; };
+type PurchaseItemDoc = { productId?: Types.ObjectId | string; quantity?: number; batchNo?: string; expiryDate?: Date | string };
 
 function getCleanId(raw: string): string {
   const trimmed = (raw || "").toString().trim();
   if (Types.ObjectId.isValid(trimmed)) return trimmed;
   const hexOnly = trimmed.replace(/[^a-fA-F0-9]/g, "");
   return hexOnly.length >= 24 ? hexOnly.slice(-24) : hexOnly;
+}
+function toObjectId(id: unknown): Types.ObjectId | null {
+  if (!id) return null;
+  const s = String(id);
+  return Types.ObjectId.isValid(s) ? new Types.ObjectId(s) : null;
 }
 
 export async function GET(_req: NextRequest, { params }: RouteParams) {
@@ -28,7 +31,7 @@ export async function GET(_req: NextRequest, { params }: RouteParams) {
   await dbConnect();
   const { id } = await params;
   const cleanId = getCleanId(id);
-  if (!Types.ObjectId.isValid(cleanId)) return NextResponse.json({ error: "Invalid id: " + id }, { status: 400 });
+  if (!Types.ObjectId.isValid(cleanId)) return NextResponse.json({ error: "Invalid id" }, { status: 400 });
   const purchase = await Purchase.findOne({ _id: cleanId, userId: new Types.ObjectId(session.user.id) }).lean();
   if (!purchase) return NextResponse.json({ error: "Not found" }, { status: 404 });
   return NextResponse.json(purchase);
@@ -40,18 +43,11 @@ export async function PUT(req: NextRequest, { params }: RouteParams) {
   await dbConnect();
   const { id } = await params;
   const cleanId = getCleanId(id);
-  if (!Types.ObjectId.isValid(cleanId)) return NextResponse.json({ error: "Invalid id" }, { status: 400 });
-  const body = (await req.json()) as UpdateBody;
-  const setFields: UpdateSet = {};
-  if (typeof body.supplier === "string") setFields.supplier = body.supplier;
-  if (typeof body.invoiceNo === "string") setFields.invoiceNo = body.invoiceNo;
-  if (body.paymentType) setFields.paymentType = body.paymentType;
-  if (Object.keys(setFields).length === 0) return NextResponse.json({ error: "No fields to update" }, { status: 400 });
+  const body = await req.json() as { supplier?: string; invoiceNo?: string; paymentType?: "cash" | "credit" };
   const updated = await Purchase.findOneAndUpdate(
     { _id: cleanId, userId: new Types.ObjectId(session.user.id) },
-    { $set: setFields }, { new: true }
+    { $set: body }, { new: true }
   );
-  if (!updated) return NextResponse.json({ error: "Not found" }, { status: 404 });
   return NextResponse.json(updated);
 }
 
@@ -68,52 +64,39 @@ export async function DELETE(_req: NextRequest, { params }: RouteParams) {
   if (!deleted) return NextResponse.json({ error: "Not found" }, { status: 404 });
 
   try {
-    const items = (deleted.items || []) as PurchaseItemDoc[];
-    // FIXED: aggregate same product+batch in deleted bill to avoid double subtract
+    const items = deleted.items as PurchaseItemDoc[];
+    // Group ONLY by batchNo (lowercase) - ignore expiry to avoid mismatch
     const agg = new Map<string, PurchaseItemDoc>();
     for (const it of items) {
-      const key = `${String(it.productId)}_${String(it.batchNo || "").trim().toLowerCase()}`;
+      const key = String(it.batchNo||"").trim().toLowerCase();
+      if (!key) continue;
       const prev = agg.get(key);
-      if (prev) agg.set(key, { ...prev, quantity: Number(prev.quantity || 0) + Number(it.quantity || 0) });
-      else agg.set(key, { ...it, batchNo: String(it.batchNo || "").trim() });
+      if (prev) agg.set(key, { ...prev, quantity: Number(prev.quantity||0)+Number(it.quantity||0) });
+      else agg.set(key, { ...it, batchNo: String(it.batchNo||"").trim() });
     }
 
     for (const item of agg.values()) {
-      const qty = Number(item.quantity || 0);
-      const batchNo = String(item.batchNo || "").trim();
-      if (!item.productId || qty <= 0) continue;
+      const qty = Number(item.quantity||0);
+      const batchNo = String(item.batchNo||"").trim();
+      const pidObj = toObjectId(item.productId);
+      if (!batchNo || qty <= 0.0001) continue;
 
-      if (batchNo) {
-        // FIXED: case-insensitive find B26 vs b26
-        const batch = await Batch.findOne({ 
-          productId: item.productId, userId,
-          batchNo: { $regex: `^${batchNo.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, $options: 'i' }
-        });
-        if (batch) {
-          const newQty = Math.round((batch.quantity - qty) * 1000) / 1000;
-          if (newQty <= 0.0001) await Batch.deleteOne({ _id: batch._id, userId });
-          else await Batch.updateOne({ _id: batch._id, userId }, { $set: { quantity: newQty } });
-        }
+      const escaped = batchNo.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      // Most robust: find by batchNo + userId only
+      const batch = await Batch.findOne({ userId, batchNo: { $regex: `^${escaped}$`, $options: 'i' } });
+
+      if (batch) {
+        const newQty = Math.round(Math.max(0, batch.quantity - qty) * 1000000) / 1000000;
+        if (newQty <= 0.001) await Batch.deleteOne({ _id: batch._id });
+        else await Batch.updateOne({ _id: batch._id }, { $set: { quantity: newQty } });
+        
+        const allBatches = await Batch.find({ productId: batch.productId, userId }).lean();
+        const sumQty = allBatches.reduce((s, b) => s + (b as { quantity: number }).quantity, 0);
+        await Product.updateOne({ _id: batch.productId, userId }, { $set: { stock: Math.round(sumQty*1000000)/1000000 } });
       }
-
-      // FIXED: recalc stock = SUM(batches) not $inc - prevents 5 → -5 → 10 double
-      const allBatches = await Batch.find({ productId: item.productId, userId, quantity: { $gt: 0 } }).lean();
-      const sumQty = allBatches.reduce((s, b) => s + (b as { quantity: number }).quantity, 0);
-      const earliest = allBatches.sort((a,b) => new Date((a as { expiryDate: Date }).expiryDate).getTime() - new Date((b as { expiryDate: Date }).expiryDate).getTime())[0] as { expiryDate: Date; batchNo: string } | undefined;
-
-      await Product.updateOne({ _id: item.productId, userId }, { 
-        $set: { 
-          stock: Math.round(sumQty*1000)/1000,
-          nearestExpiry: earliest?.expiryDate,
-          expiryDate: earliest?.expiryDate,
-          batchNo: earliest?.batchNo,
-          lastSyncedAt: new Date() 
-        } 
-      });
     }
   } catch (err) {
-    console.error("Stock revert error on purchase delete:", err);
+    console.error("Stock revert error:", err);
   }
-
   return NextResponse.json({ success: true });
 }

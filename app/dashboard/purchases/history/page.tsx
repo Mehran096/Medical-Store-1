@@ -58,42 +58,73 @@ export default function PurchaseHistoryPage(){
   useEffect(()=>{ void load(); },[load]);
 
   const del = async (id: string) => {
-    if(!confirm("Delete this purchase bill? Stock and batches will be reverted.")) return;
-    try{
-      if(typeof window!== 'undefined' && !navigator.onLine){
-        const pur = await offlineDB.purchases.where('localId').equals(id).or('_id').equals(id).first();
-        if (pur) {
-          await offlineDB.transaction('rw', offlineDB.purchases, offlineDB.batches, offlineDB.products, offlineDB.syncQueue, async () => {
-            for (const item of pur.items) {
-              const prodId = item.productId;
-              if (!prodId) continue;
-              // FIXED: decrement not delete — prevents b34 6→0 bug
-              const batch = await offlineDB.batches.where('productId').equals(prodId).filter(b=> b.batchNo === item.batchNo).first();
-              if (batch) {
-                const newQty = Math.max(0, batch.quantity - item.quantity);
-                if (newQty <= 0.0001) await offlineDB.batches.delete(batch.localId);
-                else await offlineDB.batches.update(batch.localId, { quantity: Math.round(newQty*1000)/1000, synced: 0 });
-              }
-              const prod = await offlineDB.products.where('_id').equals(prodId).or('localId').equals(prodId).first();
-              if (prod) {
-                await offlineDB.products.update(prod.localId, { stock: Math.max(0, Math.round(((prod.stock||0)-item.quantity)*1000)/1000), synced: 0 });
-              }
-            }
-            await offlineDB.purchases.delete(pur.localId);
-            await offlineDB.syncQueue.where('localId').equals(id).delete().catch(()=>{});
-          });
+  if(!confirm("Delete this purchase bill? Stock and batches will be reverted.")) return;
+  const toastId = id;
+  try{
+    if(typeof window!== 'undefined' && !navigator.onLine){
+      const pur = await offlineDB.purchases.where('localId').equals(id).or('_id').equals(id).first();
+      if (!pur) { alert("Purchase not found offline"); return; }
+      await offlineDB.transaction('rw', offlineDB.purchases, offlineDB.batches, offlineDB.products, offlineDB.syncQueue, async () => {
+        const agg = new Map<string, typeof pur.items[0]>();
+        for (const it of pur.items) {
+          const expiryDay = it.expiryDate ? it.expiryDate.slice(0,10) : "no-expiry";
+          const key = `${it.productId}_${String(it.batchNo||"").trim().toLowerCase()}_${expiryDay}`;
+          const prev = agg.get(key);
+          if (prev) agg.set(key, { ...prev, quantity: prev.quantity + it.quantity });
+          else agg.set(key, { ...it });
         }
-      } else {
-        await fetch(`/api/purchases/${id}`,{method:"DELETE"});
+        for (const item of agg.values()) {
+          const prodId = item.productId;
+          if (!prodId) continue;
+          const trimmed = String(item.batchNo||"").trim().toLowerCase();
+          const expiryDay = item.expiryDate ? item.expiryDate.slice(0,10) : "";
+          const batches = await offlineDB.batches.where('productId').equals(prodId).toArray();
+          const batch = batches.find(b=> b.batchNo.trim().toLowerCase() === trimmed && (expiryDay ? b.expiryDate.slice(0,10) === expiryDay : true));
+          if (batch) {
+            const newQty = Math.round(Math.max(0, batch.quantity - item.quantity)*1000000)/1000000;
+            if (newQty <= 0.001) await offlineDB.batches.delete(batch.localId);
+            else await offlineDB.batches.update(batch.localId, { quantity: newQty, synced: 0 });
+          }
+          const remaining = await offlineDB.batches.where('productId').equals(prodId).toArray();
+          const sum = remaining.reduce((a,b)=>a+b.quantity,0);
+          const prod = await offlineDB.products.where('_id').equals(prodId).or('localId').equals(prodId).first();
+          if (prod) {
+            await offlineDB.products.update(prod.localId, { stock: Math.round(sum*1000000)/1000000, synced: 0 });
+          }
+        }
+        await offlineDB.purchases.delete(pur.localId);
+        await offlineDB.syncQueue.where('localId').equals(id).delete().catch(()=>{});
+      });
+      await load();
+    } else {
+      // ONLINE: wait for backend + check error
+      const res = await fetch(`/api/purchases/${id}`,{method:"DELETE", cache: "no-store"});
+      const data = await res.json().catch(()=>({}));
+      if(!res.ok){
+        alert(`Delete failed: ${data.error || res.status} ${data.details || ""}`);
+        console.error("Delete failed", data);
+        return;
       }
-    } catch(e){ console.error(e); }
-    void load();
-  };
+      // success - remove from UI instantly without reload
+      setList(prev => prev.filter(p=> p._id !== id));
+      setTotal(prev => {
+        const deleted = list.find(p=> p._id === id);
+        return deleted ? prev - deleted.totalBuyAmount : prev;
+      });
+      // then reload to sync stock
+      await load();
+    }
+    if(typeof window!=='undefined') window.dispatchEvent(new Event('focus'));
+  } catch(e){ 
+    console.error(e);
+    alert("Delete error: " + String(e));
+  }
+};
 
   return(
     <div className="min-h-screen bg-gray-50 p-2">
       <div className="flex justify-between items-center mb-2">
-        <h1 className="font-bold text-[14px]">Purchase History V18.4 FIXED {typeof window!=='undefined' &&!navigator.onLine && <span className="ml-2 text-[8px] bg-red-100 text-red-600 px-1.5 py-0.5 rounded-full">OFFLINE</span>}</h1>
+        <h1 className="font-bold text-[14px]">Purchase History V34 FINAL {typeof window!=='undefined' &&!navigator.onLine && <span className="ml-2 text-[8px] bg-red-100 text-red-600 px-1.5 py-0.5 rounded-full">OFFLINE</span>}</h1>
         <div className="bg-blue-600 text-white px-3 py-1 rounded-full text-[10px] font-bold">Total: Rs.{total} {filter!=="all" && `(${list.length} bills)`}</div>
       </div>
       <div className="flex gap-1 mb-2 overflow-x-auto">

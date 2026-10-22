@@ -72,6 +72,7 @@ function getDateRange(filter: string): { start: Date; end: Date } {
   return { start, end };
 }
 
+// V32 FIX: 6 decimals not 3
 function calcDeduction(mainUnit: MainUnit, sellUnit: SellUnit, qty: number, ppb: number, mlB: number): number {
   let deductionMain = 0;
   if (mainUnit === "box") {
@@ -81,7 +82,7 @@ function calcDeduction(mainUnit: MainUnit, sellUnit: SellUnit, qty: number, ppb:
   } else {
     deductionMain = sellUnit === "ml" ? qty / mlB : qty;
   }
-  return Math.round(deductionMain * 1000) / 1000;
+  return Math.round(deductionMain * 1000000) / 1000000;
 }
 
 export async function GET(req: NextRequest) {
@@ -196,6 +197,11 @@ export async function POST(req: NextRequest) {
       }
       if (!batch) return NextResponse.json({ error: "Batch not found for sale" }, { status: 404 });
       if (new Date(batch.expiryDate) < today) return NextResponse.json({ error: `Cannot sell expired batch ${batch.batchNo}` }, { status: 400 });
+      
+      const need = Number(body.deductionMain);
+      if (batch.quantity + 0.001 < need) {
+        return NextResponse.json({ error: `Batch ${batch.batchNo} only ${batch.quantity.toFixed(6)} box left, need ${need.toFixed(6)}` }, { status: 400 });
+      }
 
       const sale = await Sale.create({
         productId: productObjectId, productName: product.name, batchId: batch._id,
@@ -203,20 +209,21 @@ export async function POST(req: NextRequest) {
         mainUnit, sellUnit, quantity, pattaPerBox: ppb, mlPerBottle: mlB,
         buyPriceMain: body.buyPriceMain ?? batch.buyPrice ?? product.buyPriceAvg,
         sellPrice, total: body.total ?? Math.round(sellPrice * quantity), profit: body.profit ?? 0,
-        deductionMain: body.deductionMain, deductionPatta: body.deductionPatta ?? 0,
+        deductionMain: need, deductionPatta: body.deductionPatta ?? Math.round(need * ppb * 1000000)/1000000,
         userId: userObjectId, localId: body.localId || `online_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`,
         customerName: body.customerName?.trim() || "Walk-in",
         paymentType: body.paymentType === "credit" || body.paymentType === "udhar" ? "credit" : body.paymentType ?? "cash",
         status: body.paymentType === "credit" || body.paymentType === "udhar" ? ("pending" as SaleStatus) : ("paid" as SaleStatus),
         isCredit: body.paymentType === "credit" || body.paymentType === "udhar",
       });
-      await Batch.updateOne({ _id: batch._id, userId: userObjectId }, { $inc: { quantity: -Number(body.deductionMain) } });
-      // V26 CLAMP NEGATIVE
-      await Batch.updateMany({ productId: productObjectId, userId: userObjectId, quantity: { $lt: 0.02, $gt: -5 } }, { $set: { quantity: 0 } });
+      
+      await Batch.updateOne({ _id: batch._id, userId: userObjectId }, { $inc: { quantity: -need } });
+      await Batch.updateMany({ productId: productObjectId, userId: userObjectId, quantity: { $lt: 0.001 } }, { $set: { quantity: 0 } });
+      
       const remaining = await Batch.find({ productId: productObjectId, userId: userObjectId, quantity: { $gt: 0.0001 } });
       const sum = remaining.reduce((s, b) => s + b.quantity, 0);
       const first = remaining.sort((a, b) => new Date(a.expiryDate).getTime() - new Date(b.expiryDate).getTime())[0];
-      await Product.updateOne({ _id: productObjectId, userId: userObjectId }, { $set: { stock: Math.max(0, Math.round(sum * 1000) / 1000), nearestExpiry: first?.expiryDate, expiryDate: first?.expiryDate, batchNo: first?.batchNo } });
+      await Product.updateOne({ _id: productObjectId, userId: userObjectId }, { $set: { stock: Math.max(0, Math.round(sum * 1000000) / 1000000), nearestExpiry: first?.expiryDate, expiryDate: first?.expiryDate, batchNo: first?.batchNo } });
       return NextResponse.json(sale, { status: 201 });
     }
 
@@ -230,8 +237,6 @@ export async function POST(req: NextRequest) {
     }
 
     const saleableQty = allBatches.reduce((s, b) => s + b.quantity, 0);
-
-    // V26 - fixes 0.5 patta ghost + EPS
     const saleablePattaRaw = mainUnit === "box" ? saleableQty * ppb : saleableQty;
     let needPattaRaw = quantity;
     if (mainUnit === "box") {
@@ -239,9 +244,9 @@ export async function POST(req: NextRequest) {
       else if (sellUnit === "half_patta") needPattaRaw = quantity * 0.5;
       else needPattaRaw = quantity * ppb;
     }
-    const saleablePatta = Math.round(saleablePattaRaw * 1000) / 1000;
-    const needPatta = Math.round(needPattaRaw * 1000) / 1000;
-    const EPS = sellUnit === "half_patta" ? 0.03 : 0.005;
+    const saleablePatta = Math.round(saleablePattaRaw * 1000000) / 1000000;
+    const needPatta = Math.round(needPattaRaw * 1000000) / 1000000;
+    const EPS = sellUnit === "half_patta" ? 0.03 : 0.001;
     if (saleablePatta + EPS < needPatta) {
       return NextResponse.json({ error: `Only ${saleablePatta.toFixed(3)} patta (${saleableQty.toFixed(3)} ${mainUnit}) left, need ${needPatta.toFixed(1)} patta` }, { status: 400 });
     }
@@ -255,7 +260,7 @@ export async function POST(req: NextRequest) {
     const usedBatches: { batchId: Types.ObjectId; take: number }[] = [];
 
     for (const batch of allBatches) {
-      if (remaining <= 0) break;
+      if (remaining <= 0.0000001) break;
       const take = Math.min(batch.quantity, remaining);
       const ratio = needMain > 0 ? take / needMain : 0;
       const qtyForBatch = quantity * ratio;
@@ -268,7 +273,7 @@ export async function POST(req: NextRequest) {
         totalProfit += (sellPrice - batch.buyPrice) * qtyForBatch;
       }
       usedBatches.push({ batchId: batch._id as Types.ObjectId, take });
-      remaining = Math.round((remaining - take) * 1000) / 1000;
+      remaining = Math.round((remaining - take) * 1000000) / 1000000;
     }
 
     const firstBatch = allBatches[0];
@@ -277,7 +282,7 @@ export async function POST(req: NextRequest) {
     const saleDoc = await Sale.create({
       productId: productObjectId, productName: product.name, batchId: firstBatch._id, batchNo: firstBatch.batchNo, expiryDate: firstBatch.expiryDate,
       mainUnit, sellUnit, quantity, pattaPerBox: ppb, mlPerBottle: mlB, buyPriceMain: firstBatch.buyPrice, sellPrice,
-      total: totalSale, profit: Math.round(totalProfit), deductionMain: needMain, deductionPatta: mainUnit === "box" ? needMain * ppb : 0,
+      total: totalSale, profit: Math.round(totalProfit), deductionMain: needMain, deductionPatta: Math.round(needMain * ppb * 1000000)/1000000,
       userId: userObjectId, localId: body.localId || `online_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`,
       customerName, paymentType: isCredit ? "credit" : body.paymentType ?? "cash",
       status: isCredit ? ("pending" as SaleStatus) : ("paid" as SaleStatus), isCredit,
@@ -286,12 +291,12 @@ export async function POST(req: NextRequest) {
     for (const { batchId, take } of usedBatches) {
       await Batch.updateOne({ _id: batchId, userId: userObjectId }, { $inc: { quantity: -take } });
     }
-    await Batch.updateMany({ productId: productObjectId, userId: userObjectId, quantity: { $lt: 0.02, $gt: -5 } }, { $set: { quantity: 0 } });
+    await Batch.updateMany({ productId: productObjectId, userId: userObjectId, quantity: { $lt: 0.001 } }, { $set: { quantity: 0 } });
 
     const remainingBatches = await Batch.find({ productId: productObjectId, userId: userObjectId, quantity: { $gt: 0.0001 } });
     const sum = remainingBatches.reduce((s, b) => s + b.quantity, 0);
     const nextEarliest = remainingBatches.sort((a, b) => new Date(a.expiryDate).getTime() - new Date(b.expiryDate).getTime())[0];
-    await Product.updateOne({ _id: productObjectId, userId: userObjectId }, { $set: { stock: Math.max(0, Math.round(sum * 1000) / 1000), nearestExpiry: nextEarliest?.expiryDate, expiryDate: nextEarliest?.expiryDate, batchNo: nextEarliest?.batchNo } });
+    await Product.updateOne({ _id: productObjectId, userId: userObjectId }, { $set: { stock: Math.max(0, Math.round(sum * 1000000) / 1000000), nearestExpiry: nextEarliest?.expiryDate, expiryDate: nextEarliest?.expiryDate, batchNo: nextEarliest?.batchNo } });
 
     if (isCredit) {
       try {

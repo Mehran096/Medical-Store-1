@@ -47,6 +47,7 @@ function getSaleableBatches(p: Product){
 function getSaleableStock(p: Product): number {
   const saleable = getSaleableBatches(p);
   if(saleable.length>0) return saleable.reduce((s,b)=>s+b.quantity,0);
+  if(p.batches && p.batches.length>0) return saleable.reduce((s,b)=>s+b.quantity,0);
   if(p.expiryDate && isExpired(p.expiryDate)) return 0;
   return p.stock;
 }
@@ -138,6 +139,7 @@ export default function SalesPage() {
     return Math.round(p.sellPrice*10)/10; 
   };
 
+  // V33 FINAL: 6 decimals fixes 0.333333 and 0.166666 half_patta
   const getSellCalc = useCallback((p: Product) => {
     const sellUnit = (sellUnitMap[p._id] || getDefaultSellUnit(p.mainUnit)) as SellUnit;
     const qty = qtyMap[p._id] || 1; 
@@ -154,7 +156,7 @@ export default function SalesPage() {
       else{ deductMain=qty; totalCalc=sellPrice*qty; profitCalc=(sellPrice-buyPrice)*qty; } 
     }
     else{ deductMain=qty; totalCalc=sellPrice*qty; profitCalc=(sellPrice-buyPrice)*qty; }
-    return { sellUnit, qty, sellPrice, defaultPrice, deductMain: Math.round(deductMain*1000)/1000, total: Math.round(totalCalc*100)/100, profit: Math.round(profitCalc*100)/100, buyPrice };
+    return { sellUnit, qty, sellPrice, defaultPrice, deductMain: Math.round(deductMain*1000000)/1000000, total: Math.round(totalCalc*100)/100, profit: Math.round(profitCalc*100)/100, buyPrice };
   }, [sellUnitMap, qtyMap, priceMap]);
 
   const refreshSalesOnly = useCallback(async () => {
@@ -215,7 +217,7 @@ export default function SalesPage() {
             return {
               ...prod,
               batches: bForProd.map(b=>({_id:b.localId, productId:b.productId, batchNo:b.batchNo, expiryDate:b.expiryDate, buyPrice:b.buyPrice, quantity:b.quantity})),
-              stock: saleableSum>0 ? saleableSum : prod.stock,
+              stock: bForProd.length>0 ? Math.round(saleableSum*1000000)/1000000 : prod.stock,
             };
           }
           return prod;
@@ -237,7 +239,7 @@ export default function SalesPage() {
         const batches: OfflineBatch[] = await offlineDB.batches.filter(b=>b.quantity>0).toArray();
         if(batches.length>0){
           const mapped = await Promise.all(batches.map(async b=>{
-            const prod = await offlineDB.products.where('_id').equals(b.productId).or('localId').equals(b.productId).first();
+            const prod = await offlineDB.products.where('localId').equals(b.productId).first() || await offlineDB.products.where('_id').equals(b.productId).first();
             return {
               _id: b.localId, productId: b.productId, name: prod?.name || b.batchNo, company: prod?.company,
               mainUnit: (prod?.mainUnit as MainUnit) || "box", pattaPerBox: prod?.pattaPerBox || 10,
@@ -288,7 +290,7 @@ export default function SalesPage() {
 
   const sell = (p: Product) => {
     const saleableStock = getSaleableStock(p);
-    if (saleableStock <= 0.0001 && p.stock > 0) {
+    if (saleableStock <= 0.0001 && p.stock > 0.0001) {
       alert(`⚠️ ${p.name} has only expired stock (Total ${p.stock}). Discard expired first.`);
       return;
     }
@@ -297,7 +299,7 @@ export default function SalesPage() {
       return;
     }
     const calc = getSellCalc(p);
-    const ppb = p.pattaPerBox && p.pattaPerBox > 0 ? p.pattaPerBox : 10;
+    const ppb = p.pattaPerBox && p.pattaPerBox>0 ? p.pattaPerBox : 10;
 
     const saleablePattaRaw = p.mainUnit === "box" ? saleableStock * ppb : saleableStock;
     let needPattaRaw = calc.qty;
@@ -306,9 +308,9 @@ export default function SalesPage() {
       else if (calc.sellUnit === "half_patta") needPattaRaw = calc.qty * 0.5;
       else if (calc.sellUnit === "box") needPattaRaw = calc.qty * ppb;
     }
-    const saleablePatta = Math.round(saleablePattaRaw * 1000) / 1000;
-    const needPatta = Math.round(needPattaRaw * 1000) / 1000;
-    const EPS = calc.sellUnit === "half_patta" ? 0.03 : 0.005;
+    const saleablePatta = Math.round(saleablePattaRaw * 1000000) / 1000000;
+    const needPatta = Math.round(needPattaRaw * 1000000) / 1000000;
+    const EPS = calc.sellUnit === "half_patta" ? 0.03 : 0.001;
     if (saleablePatta + EPS < needPatta) {
       alert(`Only ${saleablePatta.toFixed(3)} patta (${saleableStock.toFixed(3)} box) left, need ${needPatta.toFixed(1)} patta`);
       return;
@@ -320,18 +322,19 @@ export default function SalesPage() {
     const batchObj = p.batches?.find((b) => b.batchNo === batchNo);
     const batchId = batchObj?._id || p._id;
 
+    // V33 FINAL: 6 decimals, clamp 0.001
     setProducts((prev) =>
       prev.map((prod) =>
         prod._id === p._id
           ? {
               ...prod,
-              stock: (() => { const ns = prod.stock - calc.deductMain; return ns < 0.02 ? 0 : Math.round(ns*1000)/1000; })(),
-              batches: prod.batches?.map((b) => ({ ...b, quantity: b.batchNo === batchNo ? (()=>{ const nq = b.quantity - calc.deductMain; return nq < 0.02 ? 0 : Math.max(0, Math.round(nq*1000)/1000); })() : b.quantity })),
+              stock: (() => { const ns = prod.stock - calc.deductMain; return ns < 0.001 ? 0 : Math.round(ns*1000000)/1000000; })(),
+              batches: prod.batches?.map((b) => ({ ...b, quantity: b.batchNo === batchNo ? (()=>{ const nq = b.quantity - calc.deductMain; return nq < 0.001 ? 0 : Math.max(0, Math.round(nq*1000000)/1000000); })() : b.quantity })),
             }
           : prod
       )
     );
-    setExpiryProducts((prev) => prev.map((prod) => (prod.productId === p._id ? { ...prod, stock: (()=>{ const ns = prod.stock - calc.deductMain; return ns < 0.02 ? 0 : Math.round(ns*1000)/1000; })() } : prod)));
+    setExpiryProducts((prev) => prev.map((prod) => (prod.productId === p._id ? { ...prod, stock: (()=>{ const ns = prod.stock - calc.deductMain; return ns < 0.001 ? 0 : Math.round(ns*1000000)/1000000; })() } : prod)));
 
     const optimistic: Sale = {
       _id: generateLocalId(),
@@ -403,7 +406,7 @@ export default function SalesPage() {
             });
             const bList = await offlineDB.batches.where("productId").equals(p._id).toArray();
             const first = bList.sort((a,b)=>new Date(a.expiryDate).getTime()-new Date(b.expiryDate).getTime())[0];
-            if(first) await offlineDB.batches.update(first.localId, { quantity: Math.max(0, Math.round((first.quantity - calc.deductMain)*1000)/1000) });
+            if(first) await offlineDB.batches.update(first.localId, { quantity: Math.max(0, Math.round((first.quantity - calc.deductMain)*1000000)/1000000) });
             setPendingCount((c) => c + 1);
           }
         } else {
@@ -414,12 +417,10 @@ export default function SalesPage() {
           });
           const bList = await offlineDB.batches.where("productId").equals(p._id).toArray();
           const first = bList.sort((a,b)=>new Date(a.expiryDate).getTime()-new Date(b.expiryDate).getTime())[0];
-          if(first) await offlineDB.batches.update(first.localId, { quantity: Math.max(0, Math.round((first.quantity - calc.deductMain)*1000)/1000) });
+          if(first) await offlineDB.batches.update(first.localId, { quantity: Math.max(0, Math.round((first.quantity - calc.deductMain)*1000000)/1000000) });
           setPendingCount((c) => c + 1);
         }
-      } catch {
-        // silent
-      }
+      } catch {}
     })();
   };
 
@@ -452,80 +453,63 @@ export default function SalesPage() {
     if (!saleToDelete) return;
     const restore = saleToDelete.deductionMain ?? 0;
     setDeletingId(id);
-    // 1 optimistic restore only
     setSales((prev) => prev.filter((s) => s._id !== id));
     setTotal((t) => Math.max(0, t - saleToDelete.total));
     setProfit((pr) => Math.max(0, pr - saleToDelete.profit));
+    // V33 FINAL: 6 decimals
     setProducts((prev) =>
       prev.map((prod) => {
         if (prod._id !== saleToDelete.productId) return prod;
         return {
           ...prod,
-          stock: Math.round((prod.stock + restore) * 1000) / 1000,
-          batches: prod.batches?.map((b) => ({ ...b, quantity: Math.round((b.quantity + restore) * 1000) / 1000 })),
+          stock: Math.round((prod.stock + restore) * 1000000) / 1000000,
+          batches: prod.batches?.map((b) => ({ ...b, quantity: Math.round((b.quantity + restore) * 1000000) / 1000000 })),
         };
       })
     );
     try {
       if (id.startsWith("local_")) {
-        const s = await offlineDB.sales.get(id);
-        if (!s) throw new Error("Already deleted");
+        const s = await offlineDB.sales.get(id) || await offlineDB.sales.where("localId").equals(id).first();
+        if (!s) { setPendingCount((c) => Math.max(0, c - 1)); return; }
         if (s.batchId) {
-          const b = await offlineDB.batches.where("localId").equals(s.batchId).or("_id").equals(s.batchId).first();
-          if (b) await offlineDB.batches.update(b.localId, { quantity: Math.round((b.quantity + restore) * 1000) / 1000 });
+          const b = await offlineDB.batches.where("localId").equals(s.batchId).first();
+          if (b) await offlineDB.batches.update(b.localId, { quantity: Math.round((b.quantity + restore)*1000000)/1000000 });
         }
-        await offlineDB.sales.delete(id);
+        await offlineDB.sales.where("localId").equals(s.localId).delete();
         const remainingBatches = await offlineDB.batches.where("productId").equals(saleToDelete.productId).toArray();
-        const sum = remainingBatches.reduce((a, b) => a + b.quantity, 0);
-        await offlineDB.products.where("_id").equals(saleToDelete.productId).or("localId").equals(saleToDelete.productId).modify((prod) => {
-          prod.stock = Math.round(sum * 1000) / 1000;
-        });
+        const sum = remainingBatches.reduce((a,b)=>a+b.quantity,0);
+        await offlineDB.products.where("localId").equals(saleToDelete.productId).modify(p=>{ p.stock = Math.round(sum*1000000)/1000000; });
         setPendingCount((c) => Math.max(0, c - 1));
       } else {
         const res = await fetch(`/api/sales/${id}`, { method: "DELETE" });
-        const data = await res.json() as { error?: string };
-        if (!res.ok) throw new Error(data.error || "Delete failed");
+        if (!res.ok) throw new Error((await res.json()).error || "Delete failed");
         try {
           const bList = await offlineDB.batches.where("productId").equals(saleToDelete.productId).toArray();
-          if (bList.length > 0) {
-            const first = bList.sort((a, b) => new Date(a.expiryDate).getTime() - new Date(b.expiryDate).getTime())[0];
-            if (first) await offlineDB.batches.update(first.localId, { quantity: Math.round((first.quantity + restore) * 1000) / 1000 });
-          }
+          const first = bList.sort((a,b)=>new Date(a.expiryDate).getTime()-new Date(b.expiryDate).getTime())[0];
+          if(first) await offlineDB.batches.update(first.localId, { quantity: Math.round((first.quantity + restore)*1000000)/1000000 });
         } catch {}
         void refreshSalesOnly();
       }
     } catch (e) {
-      alert((e as Error).message);
-      void refreshSalesOnly();
-    } finally {
-      setDeletingId(null);
-    }
+      const msg = (e as Error).message;
+      if (!msg.includes("_id") && msg !== "Already deleted") alert(msg);
+    } finally { setDeletingId(null); }
   };
 
   const handleDiscard = async (n: Product) => {
     if (!confirm(`Discard ${n.name} Batch ${n.batchNo} Qty ${n.stock}?`)) return;
     try {
       const res = await fetch(`/api/discard-expired`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          batchId: n._id && n._id.length === 24 ? n._id : undefined,
-          productId: n.productId,
-          batchNo: n.batchNo,
-          expiryDate: n.expiryDate,
-        }),
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ batchId: n._id && n._id.length === 24 ? n._id : undefined, productId: n.productId, batchNo: n.batchNo, expiryDate: n.expiryDate }),
       });
       const data = await res.json() as { newStock?: number; error?: string };
       if (res.ok) {
         alert(`Discarded ${data.newStock !== undefined ? `New stock ${data.newStock}` : ""}`);
         setExpiryProducts((prev) => prev.filter((p) => !(p.batchNo === n.batchNo && p.expiryDate === n.expiryDate && p.productId === n.productId)));
         setProducts((prev) => prev.map((prod) => (prod._id === n.productId ? { ...prod, stock: data.newStock ?? Math.max(0, prod.stock - n.stock) } : prod)));
-      } else {
-        alert(data.error || "Failed");
-      }
-    } catch (err) {
-      alert((err as Error).message);
-    }
+      } else alert(data.error || "Failed");
+    } catch (err) { alert((err as Error).message); }
   };
 
   return (
@@ -534,7 +518,7 @@ export default function SalesPage() {
         <div className="max-w-7xl mx-auto flex flex-col gap-1.5">
           <div className="flex flex-wrap justify-between items-center gap-1">
             <div className="flex flex-wrap gap-2 items-center">
-              <h1 className="text-[11px] font-bold">💊 V27 FIXED {isOffline?"📶 Offline":""}</h1>
+              <h1 className="text-[11px] font-bold">💊 V33 FINAL {isOffline?"📶 Offline":""}</h1>
               {lastBill && (
                 <div className="flex gap-1">
                   <button onClick={()=>setShowPrint(true)} className="bg-green-600 hover:bg-green-700 text-white px-3 py-1.5 rounded-full text-[10px] font-bold animate-pulse shadow">🖨️ Print Bill ({lastBill.items.length} • Rs.{fmt(lastBill.total,0)})</button>
@@ -547,28 +531,15 @@ export default function SalesPage() {
                 <button onClick={()=>setShowExpiry(!showExpiry)} className="relative p-1.5 bg-gray-100 rounded-full hover:bg-gray-200"><span className="text-[16px]">🔔</span>{expiryNotifications.length>0 && (<span className="absolute -top-1 -right-1 bg-red-600 text-white text-[8px] w-4 h-4 rounded-full flex items-center justify-center font-bold animate-pulse">{expiryNotifications.length}</span>)}</button>
                 {showExpiry && (<><div className="fixed inset-0 bg-black/20 z-40" onClick={()=>setShowExpiry(false)}></div><div className="fixed md:absolute left-2 right-2 md:left-auto md:right-0 top-20 md:top-9 w-auto md:w-80 bg-white border shadow-xl rounded-xl z-50 max-h-[70vh] md:max-h-80 overflow-hidden flex flex-col"><div className="p-2.5 border-b bg-red-50 flex justify-between items-center"><p className="text-[11px] font-bold">⚠️ Expiry Alerts (90 days)</p><button onClick={()=>setShowExpiry(false)} className="text-[11px] bg-white border px-2.5 py-1 rounded-full">✕</button></div><div className="overflow-y-auto flex-1">{expiryNotifications.length===0? (<p className="p-4 text-[11px] text-center text-green-600">✅ No expiry</p>) : expiryNotifications.map((n, idx)=>(
                   <div key={`${n._id}_${n.batchNo}_${n.expiryDate}_${idx}`} className={`p-2 border-b text-[10px] flex justify-between items-center ${n.status==="expired"?"bg-red-50 border-l-4 border-l-red-600":"bg-amber-50 border-l-4 border-l-amber-400"}`}>
-                    <div className="flex-1 pr-2">
-                      <div className="font-bold truncate">{n.name} {n.batchNo? `• Batch ${n.batchNo}`:""}</div>
-                      <p className="text-[9px] text-gray-500 mt-0.5">{n.company? `${n.company} • `:""}Qty {fmt(n.stock,1)} • Exp: {n.expiryDate?.slice(0,10)}</p>
-                    </div>
-                    <div className="flex flex-col gap-1 items-end">
-                      <span className={`px-1.5 py-0.5 rounded-full text-[8px] font-bold ${n.status==="expired"?"bg-red-600 text-white":"bg-amber-500 text-white"}`}>{n.status==="expired"?`EXPIRED ${Math.abs(n.daysLeft)}d`:`${n.daysLeft}d left`}</span>
-                      {n.status==="expired" && (
-                        <button onClick={()=>handleDiscard(n)} className="text-[9px] bg-red-600 text-white px-2 py-1 rounded-full font-bold hover:bg-red-700">Discard</button>
-                      )}
-                    </div>
+                    <div className="flex-1 pr-2"><div className="font-bold truncate">{n.name} {n.batchNo? `• Batch ${n.batchNo}`:""}</div><p className="text-[9px] text-gray-500 mt-0.5">{n.company? `${n.company} • `:""}Qty {fmt(n.stock,1)} • Exp: {n.expiryDate?.slice(0,10)}</p></div>
+                    <div className="flex flex-col gap-1 items-end"><span className={`px-1.5 py-0.5 rounded-full text-[8px] font-bold ${n.status==="expired"?"bg-red-600 text-white":"bg-amber-500 text-white"}`}>{n.status==="expired"?`EXPIRED ${Math.abs(n.daysLeft)}d`:`${n.daysLeft}d left`}</span>{n.status==="expired" && (<button onClick={()=>handleDiscard(n)} className="text-[9px] bg-red-600 text-white px-2 py-1 rounded-full font-bold hover:bg-red-700">Discard</button>)}</div>
                   </div>
                 ))}</div></div></>)}
               </div>
               <div className="flex gap-1"><div className="bg-green-600 text-white px-2 py-1 rounded-full text-[9px] font-bold">{filter.toUpperCase()}: Rs.{fmt(total,0)}</div><div className="bg-blue-600 text-white px-2 py-1 rounded-full text-[9px] font-bold">+{fmt(profit,0)}</div>{pendingTotal>0&&<div className="bg-red-600 text-white px-2 py-1 rounded-full text-[9px] font-bold">Udhar {fmt(pendingTotal,0)}</div>}</div>
             </div>
           </div>
-          {lastBill && lastBill.items.length>0 && (
-            <div className="bg-green-50 border border-green-200 rounded-lg p-1.5 text-[10px] flex gap-1.5 overflow-x-auto scrollbar-hide">
-              <span className="font-bold whitespace-nowrap">🛒 {lastBill.customer}: </span>
-              {lastBill.items.map((it,i)=><span key={i} className="bg-white border shadow-sm px-2.5 py-1 rounded-full whitespace-nowrap text-[10px]">{it.name} {it.qty} {it.unit} = Rs.{it.total}</span>)}
-            </div>
-          )}
+          {lastBill && lastBill.items.length>0 && (<div className="bg-green-50 border border-green-200 rounded-lg p-1.5 text-[10px] flex gap-1.5 overflow-x-auto scrollbar-hide"><span className="font-bold whitespace-nowrap">🛒 {lastBill.customer}: </span>{lastBill.items.map((it,i)=><span key={i} className="bg-white border shadow-sm px-2.5 py-1 rounded-full whitespace-nowrap text-[10px]">{it.name} {it.qty} {it.unit} = Rs.{it.total}</span>)}</div>)}
           <div className="flex gap-1"><input value={customerName} onChange={e=>setCustomerName(e.target.value)} placeholder="Walk-in customer name" className="flex-1 p-2 rounded-lg border text-[11px] h-9 bg-white focus:ring-2 focus:ring-green-200 outline-none"/><div className="flex bg-gray-100 rounded-lg p-0.5 h-9"><button onClick={()=>setPaymentType("cash")} className={`px-4 rounded-md text-[10px] font-bold transition ${paymentType==="cash"?"bg-green-600 text-white shadow":"text-gray-600"}`}>Cash</button><button onClick={()=>setPaymentType("credit")} className={`px-4 rounded-md text-[10px] font-bold transition ${paymentType==="credit"?"bg-red-600 text-white shadow":"text-gray-600"}`}>Udhar</button></div></div>
           {mounted&&(isOffline||pendingCount>0)&&<div className="text-[10px] p-1.5 rounded-lg flex justify-between bg-blue-50 border"><span>{isOffline?`Offline Mode - ${pendingCount} pending`:`${pendingCount} pending sync`}</span>{!isOffline&&<button onClick={()=>{ void syncPendingSales(); }} disabled={syncing} className="bg-blue-600 text-white px-2 py-0.5 rounded text-[10px]">{syncing?"Syncing...":"Sync Now"}</button>}</div>}
           {expiryNotifications.length>0 && (<div className={`border text-[10px] p-1.5 rounded-lg flex justify-between ${expiredCount>0?"bg-red-50 border-red-300 text-red-700":"bg-amber-50 border-amber-300 text-amber-800"}`}><span>⚠️ {expiredCount} Expired, {soonCount} Soon (90d)</span><button onClick={()=>setShowExpiry(true)} className="font-bold underline">View</button></div>)}
@@ -619,20 +590,12 @@ export default function SalesPage() {
           {pagination.hasMore&&<div className="p-1.5 bg-gray-50"><button onClick={()=>setPage(p=>p+1)} disabled={!!deletingId} className="w-full py-2.5 bg-white border rounded-lg text-[11px] font-bold hover:bg-gray-50">Load More Sales</button></div>}
         </div>
       </div>
-
       {showPrint && lastBill && (
         <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-60 flex items-center justify-center p-2 md:p-3">
           <div className="bg-white w-full max-w-95 md:w-90 rounded-2xl shadow-2xl overflow-hidden max-h-[90vh] flex flex-col">
             <div className="p-4 md:p-5 text-[11px] overflow-y-auto flex-1" id="print-area">
-              <div className="text-center border-b-2 border-dashed border-black pb-3 mb-3">
-                <h1 className="font-bold text-[18px] tracking-tight">💊 Yasir Medical Store</h1>
-                <p className="text-[10px] mt-1 text-gray-700">Main Bazar Ismaila - Swabi</p>
-              </div>
-              <div className="text-[10px] mb-3 space-y-1 bg-gray-50 p-2 rounded-lg">
-                <div className="flex justify-between"><span className="text-gray-600">Date:</span><span className="font-mono font-bold">{lastBill.time}</span></div>
-                <div className="flex justify-between"><span className="text-gray-600">Customer:</span><span className="font-bold">{lastBill.customer}</span></div>
-                <div className="flex justify-between"><span className="text-gray-600">Bill #:</span><span className="font-mono">{lastBill.billNo}</span></div>
-              </div>
+              <div className="text-center border-b-2 border-dashed border-black pb-3 mb-3"><h1 className="font-bold text-[18px] tracking-tight">💊 Yasir Medical Store</h1><p className="text-[10px] mt-1 text-gray-700">Main Bazar Ismaila - Swabi</p></div>
+              <div className="text-[10px] mb-3 space-y-1 bg-gray-50 p-2 rounded-lg"><div className="flex justify-between"><span className="text-gray-600">Date:</span><span className="font-mono font-bold">{lastBill.time}</span></div><div className="flex justify-between"><span className="text-gray-600">Customer:</span><span className="font-bold">{lastBill.customer}</span></div><div className="flex justify-between"><span className="text-gray-600">Bill #:</span><span className="font-mono">{lastBill.billNo}</span></div></div>
               <table className="w-full text-[11px]"><thead><tr className="text-left text-[9px] text-gray-500 border-b border-dashed border-black"><th className="py-1.5">#</th><th>Item</th><th className="text-right">Amt</th></tr></thead><tbody>{lastBill.items.map((it,i)=>(<tr key={i} className="border-b border-dotted border-gray-200"><td className="py-2 align-top">{i+1}</td><td className="py-2"><div className="font-bold leading-tight">{it.name}</div><div className="text-[9px] text-gray-500">{it.qty} {it.unit} × Rs.{it.price}</div></td><td className="py-2 text-right font-bold align-top">Rs.{it.total}</td></tr>))}</tbody></table>
               <div className="mt-3 space-y-1.5 text-[11px] bg-gray-50 p-2.5 rounded-lg"><div className="flex justify-between font-bold text-[16px] border-t-2 border-dashed border-black pt-2"><span>TOTAL:</span><span>Rs.{fmt(lastBill.total,0)}</span></div></div>
             </div>

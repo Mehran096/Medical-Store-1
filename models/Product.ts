@@ -12,7 +12,10 @@ export interface IProduct {
   buyPriceAvg: number;
   stock: number;
   stockDisplay?: string;
-  nearestExpiry?: Date; // NEW: denormalized from batches for fast expiry alerts
+  nearestExpiry?: Date;
+  expiryDate?: Date; // FIXED: add - used in recalc
+  batchNo?: string; // FIXED: add - used in recalc
+  buyPrice?: number; // FIXED: add - legacy field
   sellPriceBox?: number;
   sellPriceHalfPatta?: number;
   sellPricePatta?: number;
@@ -33,17 +36,19 @@ const ProductSchema = new Schema<IProduct>({
   mlPerBottle: { type: Number, default: 120, min: 1 },
 
   sellPrice: { type: Number, required: true, default: 0 },
-  buyPriceAvg: { type: Number, required: true, default: 0 }, // FIXED: required
+  buyPriceAvg: { type: Number, required: true, default: 0 },
+  buyPrice: { type: Number, default: 0 }, // legacy
   stock: { type: Number, required: true, default: 0, min: 0 },
-  nearestExpiry: { type: Date, index: true }, // FIXED: for expiry sort
+  nearestExpiry: { type: Date, index: true },
+  expiryDate: { type: Date, index: true }, // NEW
+  batchNo: { type: String, trim: true }, // NEW
 
   userId: { type: Schema.Types.ObjectId, ref: "User", required: true, index: true },
   localId: { type: String, sparse: true, index: true },
   synced: { type: Boolean, default: true },
   lastSyncedAt: { type: Date, default: Date.now },
-}, { timestamps: true, toJSON: { virtuals: true }, toObject: { virtuals: true } });
+}, { timestamps: true, toJSON: { virtuals: true }, toObject: { virtuals: true }, strict: false }); // allow extra
 
-// FIXED: Prevent duplicate medicines per user
 ProductSchema.index({ userId: 1, name: 1, company: 1 }, { unique: false });
 ProductSchema.index({ name: "text", company: "text", generic: "text" });
 

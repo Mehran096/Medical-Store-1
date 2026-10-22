@@ -42,6 +42,7 @@ function isValidObjectId(id: string): boolean {
 function normalizeName(name: string | undefined): string {
   return (name || "Walk-in").trim() || "Walk-in";
 }
+// V32 FIX: 6 decimals
 function calcDeduction(mainUnit: MainUnit, sellUnit: SellUnit, qty: number, ppb: number, mlB: number): number {
   let d = 0;
   if (mainUnit === "box") {
@@ -51,7 +52,7 @@ function calcDeduction(mainUnit: MainUnit, sellUnit: SellUnit, qty: number, ppb:
   } else {
     d = sellUnit === "ml" ? qty / mlB : qty;
   }
-  return Math.round(d * 1000) / 1000;
+  return Math.round(d * 1000000) / 1000000;
 }
 function getNeedPatta(mainUnit: MainUnit, sellUnit: SellUnit, qty: number, ppb: number): number {
   if (mainUnit !== "box") return qty;
@@ -67,7 +68,7 @@ async function recalcProductStock(productId: Types.ObjectId, userId: Types.Objec
     { _id: productId, userId },
     {
       $set: {
-        stock: Math.round(sum * 1000) / 1000,
+        stock: Math.round(sum * 1000000) / 1000000, // V32 6 decimals
         nearestExpiry: earliest?.expiryDate,
         expiryDate: earliest?.expiryDate,
         batchNo: earliest?.batchNo,
@@ -140,8 +141,8 @@ export async function PUT(req: NextRequest, { params }: Params) {
     const allBatchesForCheck = (await Batch.find({ productId: existingSale.productId, userId: userObjectId, quantity: { $gt: 0.0001 } }).sort({ expiryDate: 1 })) as BatchDoc[];
     const totalAvailable = allBatchesForCheck.reduce((s, b) => s + b.quantity, 0);
 
-    // V20.9 FIX: patta based check
-    const availPatta = getNeedPatta(newMainUnit, "box", totalAvailable, 1);
+    // V32 FIX: availPatta = totalAvailable * ppb, not getNeedPatta(box,1)
+    const availPatta = newMainUnit === "box" ? totalAvailable * ppb : totalAvailable;
     const needPatta = getNeedPatta(newMainUnit, newSellUnit, newQuantity, ppb);
     if (availPatta + 0.001 < needPatta) {
       if (oldBatchId && isValidObjectId(String(oldBatchId))) {
@@ -153,11 +154,11 @@ export async function PUT(req: NextRequest, { params }: Params) {
     let remaining = newDeduct;
     let firstBatchUsed: BatchDoc | null = null;
     for (const batch of allBatchesForCheck) {
-      if (remaining <= 0) break;
+      if (remaining <= 0.0000001) break;
       const take = Math.min(batch.quantity, remaining);
       await Batch.updateOne({ _id: batch._id, userId: userObjectId }, { $inc: { quantity: -take } });
       if (!firstBatchUsed) firstBatchUsed = batch;
-      remaining = Math.round((remaining - take) * 1000) / 1000;
+      remaining = Math.round((remaining - take) * 1000000) / 1000000;
     }
 
     await recalcProductStock(existingSale.productId as Types.ObjectId, userObjectId);
@@ -167,7 +168,7 @@ export async function PUT(req: NextRequest, { params }: Params) {
     existingSale.mainUnit = newMainUnit;
     existingSale.sellPrice = Number(newSellPrice);
     existingSale.deductionMain = newDeduct;
-    existingSale.deductionPatta = newMainUnit === "box" ? newDeduct * ppb : 0;
+    existingSale.deductionPatta = newMainUnit === "box" ? Math.round(newDeduct * ppb * 1000000)/1000000 : 0;
 
     if (firstBatchUsed) {
       existingSale.batchId = firstBatchUsed._id;

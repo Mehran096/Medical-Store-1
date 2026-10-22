@@ -89,7 +89,6 @@ export async function POST(req: NextRequest) {
 
   const calculatedTotal = body.items.reduce((sum, it) => sum + Number(it.quantity) * Number(it.buyPricePerUnit), 0);
 
-  // FIXED: key includes expiry day - prevents B26 same batchNo different expiry merging to 10
   const aggMap = new Map<string, PurchaseItemInput>();
   for (const it of body.items) {
     const expiryDay = it.expiryDate ? new Date(it.expiryDate).toISOString().slice(0,10) : "no-expiry";
@@ -140,7 +139,6 @@ export async function POST(req: NextRequest) {
         productId = newProduct._id as Types.ObjectId;
       }
 
-      // FIXED: find by batchNo + expiry DAY (not just batchNo) - prevents overwrite expiry qty
       const existingBatch = await Batch.findOne({ 
         productId, userId,
         batchNo: { $regex: `^${escapeRegex(batchNoTrimmed)}$`, $options: 'i' },
@@ -148,14 +146,12 @@ export async function POST(req: NextRequest) {
       });
 
       if (existingBatch) {
-        // SAME batchNo + SAME expiry day → add qty, DON'T overwrite expiryDate
-        existingBatch.quantity = Math.round((existingBatch.quantity + qty) * 1000) / 1000;
+        existingBatch.quantity = Math.round((existingBatch.quantity + qty) * 1000000) / 1000000;
         existingBatch.buyPrice = buyPrice;
         await existingBatch.save();
       } else {
-        // SAME batchNo + DIFFERENT expiry → new batch (don't overwrite stock of expiry)
         await Batch.create({
-          productId, batchNo: batchNoTrimmed, expiryDate: expiryDateObj, buyPrice, quantity: Math.round(qty*1000)/1000, userId,
+          productId, batchNo: batchNoTrimmed, expiryDate: expiryDateObj, buyPrice, quantity: Math.round(qty*1000000)/1000000, userId,
           localId: `batch_${Date.now()}_${Math.random().toString(36).slice(2,7)}`,
         });
       }
@@ -166,7 +162,7 @@ export async function POST(req: NextRequest) {
 
       await Product.updateOne({ _id: productId, userId }, {
         $set: { 
-          stock: Math.round(sumQty*1000)/1000,
+          stock: Math.round(sumQty*1000000)/1000000,
           lastSyncedAt: new Date(), 
           nearestExpiry: earliest?.expiryDate,
           expiryDate: earliest?.expiryDate,

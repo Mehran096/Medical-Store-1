@@ -178,7 +178,7 @@ export async function getExpiringBatches(userId: string, days = 90): Promise<Off
     const key = `${b.productId}_${b.batchNo.trim().toLowerCase()}_${b.expiryDate.slice(0, 10)}`;
     const prev = map.get(key);
     if (!prev) map.set(key, b);
-    else map.set(key, { ...prev, quantity: Math.round((prev.quantity + b.quantity) * 1000) / 1000 });
+    else map.set(key, { ...prev, quantity: Math.round((prev.quantity + b.quantity) * 1000000)/1000000 });
   }
   return Array.from(map.values());
 }
@@ -209,9 +209,11 @@ export async function addOfflinePurchase(
   await offlineDB.transaction("rw", offlineDB.purchases, offlineDB.batches, offlineDB.products, offlineDB.syncQueue, async () => {
     await offlineDB.purchases.add(purchase);
 
+    // FIXED V34: key includes expiry day like online
     const agg = new Map<string, OfflinePurchaseItem>();
     for (const it of items) {
-      const key = `${it.productId}_${String(it.batchNo).trim().toLowerCase()}`;
+      const expiryDay = it.expiryDate ? it.expiryDate.slice(0,10) : "no-expiry";
+      const key = `${it.productId}_${String(it.batchNo).trim().toLowerCase()}_${expiryDay}`;
       const prev = agg.get(key);
       if (prev) agg.set(key, { ...prev, quantity: prev.quantity + it.quantity });
       else agg.set(key, { ...it, batchNo: String(it.batchNo).trim() });
@@ -220,12 +222,14 @@ export async function addOfflinePurchase(
     for (const item of agg.values()) {
       const trimmed = String(item.batchNo).trim();
       const lower = trimmed.toLowerCase();
+      const expiryDay = item.expiryDate ? item.expiryDate.slice(0,10) : "";
 
       const allForProduct = await offlineDB.batches.where("productId").equals(item.productId).toArray();
-      const existing = allForProduct.find((b) => b.batchNo.trim().toLowerCase() === lower && b.userId === userId);
+      // FIXED V34: find by batchNo + expiry day
+      const existing = allForProduct.find((b) => b.batchNo.trim().toLowerCase() === lower && b.expiryDate.slice(0,10) === expiryDay && b.userId === userId);
 
       if (existing) {
-        const newQty = Math.round((existing.quantity + item.quantity) * 1000) / 1000;
+        const newQty = Math.round((existing.quantity + item.quantity) * 1000000)/1000000;
         await offlineDB.batches.update(existing.localId, {
           quantity: newQty,
           expiryDate: item.expiryDate,
@@ -240,7 +244,7 @@ export async function addOfflinePurchase(
           batchNo: trimmed,
           expiryDate: item.expiryDate,
           buyPrice: item.buyPricePerUnit,
-          quantity: Math.round(item.quantity * 1000) / 1000,
+          quantity: Math.round(item.quantity * 1000000)/1000000,
           userId,
           synced: 0,
           createdAt: new Date().toISOString(),
@@ -248,7 +252,7 @@ export async function addOfflinePurchase(
         await offlineDB.batches.add(batch);
       }
 
-      // FIXED: Recalc product stock = sum of batches
+      // FIXED V34: SUM + 6 decimals
       const batchesForProduct = await offlineDB.batches.where("productId").equals(item.productId).toArray();
       const sum = batchesForProduct.reduce((s, b) => s + b.quantity, 0);
       const prod = await offlineDB.products.where("_id").equals(item.productId).or("localId").equals(item.productId).first();
@@ -257,7 +261,7 @@ export async function addOfflinePurchase(
         const newStockForAvg = currentStock + item.quantity;
         const newAvg = prod.buyPriceAvg ? (prod.buyPriceAvg * currentStock + item.buyPricePerUnit * item.quantity) / newStockForAvg : item.buyPricePerUnit;
         await offlineDB.products.update(prod.localId, {
-          stock: Math.round(sum * 1000) / 1000,
+          stock: Math.round(sum * 1000000) / 1000000,
           buyPriceAvg: Math.round(newAvg * 100) / 100,
           synced: 0,
         });
