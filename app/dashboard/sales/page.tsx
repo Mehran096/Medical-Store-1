@@ -299,7 +299,6 @@ export default function SalesPage() {
     const calc = getSellCalc(p);
     const ppb = p.pattaPerBox && p.pattaPerBox > 0 ? p.pattaPerBox : 10;
 
-    // V26 FINAL
     const saleablePattaRaw = p.mainUnit === "box" ? saleableStock * ppb : saleableStock;
     let needPattaRaw = calc.qty;
     if (p.mainUnit === "box") {
@@ -402,6 +401,9 @@ export default function SalesPage() {
               pattaPerBox: ppb, mlPerBottle: p.mlPerBottle, buyPriceMain: calc.buyPrice, sellPrice: calc.sellPrice,
               userId: offlineUser?._id || "offline", customerName: finalCustomer, paymentType, batchId, batchNo, deductionMain: calc.deductMain,
             });
+            const bList = await offlineDB.batches.where("productId").equals(p._id).toArray();
+            const first = bList.sort((a,b)=>new Date(a.expiryDate).getTime()-new Date(b.expiryDate).getTime())[0];
+            if(first) await offlineDB.batches.update(first.localId, { quantity: Math.max(0, Math.round((first.quantity - calc.deductMain)*1000)/1000) });
             setPendingCount((c) => c + 1);
           }
         } else {
@@ -410,6 +412,9 @@ export default function SalesPage() {
             pattaPerBox: ppb, mlPerBottle: p.mlPerBottle, buyPriceMain: calc.buyPrice, sellPrice: calc.sellPrice,
             userId: offlineUser?._id || "offline", customerName: finalCustomer, paymentType, batchId, batchNo, deductionMain: calc.deductMain,
           });
+          const bList = await offlineDB.batches.where("productId").equals(p._id).toArray();
+          const first = bList.sort((a,b)=>new Date(a.expiryDate).getTime()-new Date(b.expiryDate).getTime())[0];
+          if(first) await offlineDB.batches.update(first.localId, { quantity: Math.max(0, Math.round((first.quantity - calc.deductMain)*1000)/1000) });
           setPendingCount((c) => c + 1);
         }
       } catch {
@@ -441,31 +446,53 @@ export default function SalesPage() {
   },[lastBill]);
 
   const handleDeleteSale = async (id: string) => {
+    if (deletingId) return;
     if (!confirm("Delete sale and restore stock?")) return;
     const saleToDelete = sales.find((s) => s._id === id);
     if (!saleToDelete) return;
     const restore = saleToDelete.deductionMain ?? 0;
     setDeletingId(id);
+    // 1 optimistic restore only
     setSales((prev) => prev.filter((s) => s._id !== id));
     setTotal((t) => Math.max(0, t - saleToDelete.total));
     setProfit((pr) => Math.max(0, pr - saleToDelete.profit));
     setProducts((prev) =>
-      prev.map((prod) => (prod._id === saleToDelete.productId ? { ...prod, stock: Math.round((prod.stock + restore) * 1000) / 1000 } : prod))
+      prev.map((prod) => {
+        if (prod._id !== saleToDelete.productId) return prod;
+        return {
+          ...prod,
+          stock: Math.round((prod.stock + restore) * 1000) / 1000,
+          batches: prod.batches?.map((b) => ({ ...b, quantity: Math.round((b.quantity + restore) * 1000) / 1000 })),
+        };
+      })
     );
     try {
       if (id.startsWith("local_")) {
         const s = await offlineDB.sales.get(id);
-        if (s?.batchId) {
+        if (!s) throw new Error("Already deleted");
+        if (s.batchId) {
           const b = await offlineDB.batches.where("localId").equals(s.batchId).or("_id").equals(s.batchId).first();
-          if (b) await offlineDB.batches.update(b.localId, { quantity: b.quantity + restore });
+          if (b) await offlineDB.batches.update(b.localId, { quantity: Math.round((b.quantity + restore) * 1000) / 1000 });
         }
         await offlineDB.sales.delete(id);
-        await offlineDB.products.where("_id").equals(saleToDelete.productId).or("localId").equals(saleToDelete.productId).modify((prod) => { prod.stock += restore; });
+        const remainingBatches = await offlineDB.batches.where("productId").equals(saleToDelete.productId).toArray();
+        const sum = remainingBatches.reduce((a, b) => a + b.quantity, 0);
+        await offlineDB.products.where("_id").equals(saleToDelete.productId).or("localId").equals(saleToDelete.productId).modify((prod) => {
+          prod.stock = Math.round(sum * 1000) / 1000;
+        });
         setPendingCount((c) => Math.max(0, c - 1));
       } else {
         const res = await fetch(`/api/sales/${id}`, { method: "DELETE" });
         const data = await res.json() as { error?: string };
         if (!res.ok) throw new Error(data.error || "Delete failed");
+        try {
+          const bList = await offlineDB.batches.where("productId").equals(saleToDelete.productId).toArray();
+          if (bList.length > 0) {
+            const first = bList.sort((a, b) => new Date(a.expiryDate).getTime() - new Date(b.expiryDate).getTime())[0];
+            if (first) await offlineDB.batches.update(first.localId, { quantity: Math.round((first.quantity + restore) * 1000) / 1000 });
+          }
+        } catch {}
+        void refreshSalesOnly();
       }
     } catch (e) {
       alert((e as Error).message);
@@ -507,7 +534,7 @@ export default function SalesPage() {
         <div className="max-w-7xl mx-auto flex flex-col gap-1.5">
           <div className="flex flex-wrap justify-between items-center gap-1">
             <div className="flex flex-wrap gap-2 items-center">
-              <h1 className="text-[11px] font-bold">💊 V26 FIXED {isOffline?"📶 Offline":""}</h1>
+              <h1 className="text-[11px] font-bold">💊 V27 FIXED {isOffline?"📶 Offline":""}</h1>
               {lastBill && (
                 <div className="flex gap-1">
                   <button onClick={()=>setShowPrint(true)} className="bg-green-600 hover:bg-green-700 text-white px-3 py-1.5 rounded-full text-[10px] font-bold animate-pulse shadow">🖨️ Print Bill ({lastBill.items.length} • Rs.{fmt(lastBill.total,0)})</button>
