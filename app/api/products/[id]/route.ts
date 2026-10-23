@@ -13,31 +13,18 @@ type Params = { params: Promise<{ id: string }> };
 type MainUnit = "box" | "bottle" | "tube" | "piece";
 
 type ProductBody = {
-  name?: string; company?: string; generic?: string; 
+  name?: string; company?: string; generic?: string;
   batchNo?: string; expiryDate?: string;
   barcode?: string; rack?: string;
   mainUnit?: MainUnit; pattaPerBox?: number; mlPerBottle?: number;
-  buyPrice?: number; sellPrice?: number; stock?: number;
+  buyPrice?: number; sellPrice?: number;
+  stock?: number; quantity?: number;
 };
 
-type ProductLean = {
-  _id: Types.ObjectId;
-  stock: number;
-  expiryDate?: Date;
-  batchNo?: string;
-  nearestExpiry?: Date | null;
-};
+type BatchLean = { _id: Types.ObjectId; batchNo: string; expiryDate: Date; quantity: number };
+type ProductLean = { _id: Types.ObjectId; stock: number; expiryDate?: Date; batchNo?: string; nearestExpiry?: Date };
 
-type BatchLean = {
-  _id: Types.ObjectId;
-  batchNo: string;
-  expiryDate: Date;
-  quantity: number;
-};
-
-function isValidObjectId(id: string): boolean { 
-  return Types.ObjectId.isValid(id); 
-}
+function isValidObjectId(id: string): boolean { return Types.ObjectId.isValid(id); }
 
 export async function GET(_req: NextRequest, { params }: Params) {
   const { id } = await params;
@@ -47,15 +34,12 @@ export async function GET(_req: NextRequest, { params }: Params) {
     if (!session?.user?.id) return NextResponse.json({ message: "Unauthorized" }, { status: 401 });
     await dbConnect();
     const userId = new Types.ObjectId(session.user.id);
-    
-    const product = await Product.findOne({ _id: id, userId }).lean<ProductLean & Record<string, unknown>>();
+    const product = await Product.findOne({ _id: id, userId }).lean();
     if (!product) return NextResponse.json({ message: "Product not found" }, { status: 404 });
-    
     const batches = await Batch.find({ productId: product._id, userId, quantity: { $gt: 0 } }).sort({ expiryDate: 1 }).lean<BatchLean[]>();
-    
     return NextResponse.json({ ...product, batches });
-  } catch { 
-    return NextResponse.json({ message: "Failed to fetch" }, { status: 500 }); 
+  } catch {
+    return NextResponse.json({ message: "Failed to fetch" }, { status: 500 });
   }
 }
 
@@ -69,10 +53,7 @@ export async function PUT(req: NextRequest, { params }: Params) {
     const userId = new Types.ObjectId(session.user.id);
     const body = (await req.json()) as ProductBody;
 
-    const updateData: Record<string, string | number | Date | boolean> = { 
-      lastSyncedAt: new Date(), synced: true 
-    };
-
+    const updateData: Record<string, string | number | Date | boolean> = { lastSyncedAt: new Date(), synced: true };
     if (body.name) updateData.name = body.name.trim();
     if (body.company) updateData.company = body.company.trim();
     if (body.generic !== undefined) updateData.generic = body.generic.trim();
@@ -84,49 +65,46 @@ export async function PUT(req: NextRequest, { params }: Params) {
     if (body.sellPrice !== undefined) updateData.sellPrice = Number(body.sellPrice);
     if (body.buyPrice !== undefined) updateData.buyPriceAvg = Number(body.buyPrice);
 
-    const updated = await Product.findOneAndUpdate(
-      { _id: id, userId },
-      updateData,
-      { new: true, runValidators: true }
-    ).lean<ProductLean & Record<string, unknown>>();
-
+    const updated = await Product.findOneAndUpdate({ _id: id, userId }, updateData, { new: true, runValidators: true }).lean<ProductLean>();
     if (!updated) return NextResponse.json({ message: "Product not found" }, { status: 404 });
 
-    // FIXED: add userId filter + edit by batchNo if provided, else earliest batch
-    if (body.batchNo || body.expiryDate || body.buyPrice !== undefined) {
+    // FIXED: update batch if batchNo/expiry/buyPrice/stock/quantity provided
+    if (body.batchNo || body.expiryDate || body.buyPrice !== undefined || body.stock !== undefined || body.quantity !== undefined) {
       let targetBatch = null;
       if (body.batchNo) {
         const trimmed = String(body.batchNo).trim();
-        targetBatch = await Batch.findOne({ 
-          productId: updated._id, userId,
-          batchNo: { $regex: `^${trimmed.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, $options: 'i' }
-        });
+        const esc = trimmed.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+        targetBatch = await Batch.findOne({ productId: updated._id, userId, batchNo: { $regex: `^${esc}$`, $options: "i" } });
       }
       if (!targetBatch) {
         targetBatch = await Batch.findOne({ productId: updated._id, userId }).sort({ expiryDate: 1 });
       }
-      
       if (targetBatch) {
         if (body.batchNo) targetBatch.batchNo = String(body.batchNo).trim();
         if (body.expiryDate) targetBatch.expiryDate = new Date(body.expiryDate);
         if (body.buyPrice !== undefined) targetBatch.buyPrice = Number(body.buyPrice);
+        if (body.stock !== undefined) targetBatch.quantity = Number(body.stock);
+        else if (body.quantity !== undefined) targetBatch.quantity = Number(body.quantity);
         await targetBatch.save();
       }
     }
 
-    // FIXED: recalc stock = sum batches + expiry fields for sale card + 🔔
+    // ALWAYS recalc stock = sum batches — fixes 5 box bug
     const allBatches = await Batch.find({ productId: updated._id, userId, quantity: { $gt: 0 } }).sort({ expiryDate: 1 }).lean<BatchLean[]>();
     const sumQty = allBatches.reduce((s, b) => s + b.quantity, 0);
     const earliest = allBatches[0];
 
-    if (earliest) {
-      await Product.updateOne({ _id: updated._id }, { 
-        stock: Math.round(sumQty*1000)/1000,
-        nearestExpiry: earliest.expiryDate,
-        expiryDate: earliest.expiryDate,
-        batchNo: earliest.batchNo,
-      });
-    }
+    await Product.updateOne(
+      { _id: updated._id, userId },
+      {
+        $set: {
+          stock: Math.round(sumQty * 1000000) / 1000000,
+          nearestExpiry: earliest?.expiryDate ?? null,
+          expiryDate: earliest?.expiryDate ?? null,
+          batchNo: earliest?.batchNo ?? "",
+        },
+      }
+    );
 
     const batches = await Batch.find({ productId: updated._id, userId }).sort({ expiryDate: 1 }).lean<BatchLean[]>();
     const refreshed = await Product.findById(updated._id).lean();
@@ -144,15 +122,11 @@ export async function DELETE(_req: NextRequest, { params }: Params) {
     const session = await getServerSession(authOptions);
     if (!session?.user?.id) return NextResponse.json({ message: "Unauthorized" }, { status: 401 });
     await dbConnect();
-    
     const productId = new Types.ObjectId(id);
     const userId = new Types.ObjectId(session.user.id);
-    
     const deleted = await Product.findOneAndDelete({ _id: productId, userId });
     if (!deleted) return NextResponse.json({ message: "Product not found" }, { status: 404 });
-    
     await Batch.deleteMany({ productId, userId });
-    
     return NextResponse.json({ message: "Product deleted successfully" });
   } catch (error) {
     console.error("DELETE error:", error);

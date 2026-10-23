@@ -11,10 +11,10 @@ export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
 type RouteParams = { params: Promise<{ id: string }> };
-type PurchaseItemDoc = { productId?: Types.ObjectId | string; quantity?: number; batchNo?: string; expiryDate?: Date | string };
+type PurchaseItemDoc = { productId: Types.ObjectId | string; quantity: number; batchNo: string };
 
 function getCleanId(raw: string): string {
-  const trimmed = (raw || "").toString().trim();
+  const trimmed = raw.trim();
   if (Types.ObjectId.isValid(trimmed)) return trimmed;
   const hexOnly = trimmed.replace(/[^a-fA-F0-9]/g, "");
   return hexOnly.length >= 24 ? hexOnly.slice(-24) : hexOnly;
@@ -31,7 +31,6 @@ export async function GET(_req: NextRequest, { params }: RouteParams) {
   await dbConnect();
   const { id } = await params;
   const cleanId = getCleanId(id);
-  if (!Types.ObjectId.isValid(cleanId)) return NextResponse.json({ error: "Invalid id" }, { status: 400 });
   const purchase = await Purchase.findOne({ _id: cleanId, userId: new Types.ObjectId(session.user.id) }).lean();
   if (!purchase) return NextResponse.json({ error: "Not found" }, { status: 404 });
   return NextResponse.json(purchase);
@@ -43,10 +42,11 @@ export async function PUT(req: NextRequest, { params }: RouteParams) {
   await dbConnect();
   const { id } = await params;
   const cleanId = getCleanId(id);
-  const body = await req.json() as { supplier?: string; invoiceNo?: string; paymentType?: "cash" | "credit" };
+  const body = (await req.json()) as { supplier?: string; invoiceNo?: string; paymentType?: "cash" | "credit" };
   const updated = await Purchase.findOneAndUpdate(
     { _id: cleanId, userId: new Types.ObjectId(session.user.id) },
-    { $set: body }, { new: true }
+    { $set: body },
+    { new: true }
   );
   return NextResponse.json(updated);
 }
@@ -65,34 +65,47 @@ export async function DELETE(_req: NextRequest, { params }: RouteParams) {
 
   try {
     const items = deleted.items as PurchaseItemDoc[];
-    // Group ONLY by batchNo (lowercase) - ignore expiry to avoid mismatch
-    const agg = new Map<string, PurchaseItemDoc>();
+    const agg = new Map<string, { qty: number; pid: Types.ObjectId; bNo: string }>();
+
     for (const it of items) {
-      const key = String(it.batchNo||"").trim().toLowerCase();
-      if (!key) continue;
-      const prev = agg.get(key);
-      if (prev) agg.set(key, { ...prev, quantity: Number(prev.quantity||0)+Number(it.quantity||0) });
-      else agg.set(key, { ...it, batchNo: String(it.batchNo||"").trim() });
+      const bNo = String(it.batchNo).trim();
+      const pid = toObjectId(it.productId);
+      if (!bNo || !pid) continue;
+      const key = `${pid.toString()}_${bNo.toLowerCase()}`;
+      const cur = agg.get(key);
+      if (cur) cur.qty += Number(it.quantity);
+      else agg.set(key, { qty: Number(it.quantity), pid, bNo });
     }
 
-    for (const item of agg.values()) {
-      const qty = Number(item.quantity||0);
-      const batchNo = String(item.batchNo||"").trim();
-      const pidObj = toObjectId(item.productId);
-      if (!batchNo || qty <= 0.0001) continue;
-
-      const escaped = batchNo.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-      // Most robust: find by batchNo + userId only
-      const batch = await Batch.findOne({ userId, batchNo: { $regex: `^${escaped}$`, $options: 'i' } });
+    for (const v of agg.values()) {
+      const escaped = v.bNo.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const batch = await Batch.findOne({
+        productId: v.pid,
+        userId,
+        batchNo: { $regex: `^${escaped}$`, $options: "i" },
+      });
 
       if (batch) {
-        const newQty = Math.round(Math.max(0, batch.quantity - qty) * 1000000) / 1000000;
+        const newQty = Math.round(Math.max(0, batch.quantity - v.qty) * 1000000) / 1000000;
+
         if (newQty <= 0.001) await Batch.deleteOne({ _id: batch._id });
         else await Batch.updateOne({ _id: batch._id }, { $set: { quantity: newQty } });
-        
-        const allBatches = await Batch.find({ productId: batch.productId, userId }).lean();
-        const sumQty = allBatches.reduce((s, b) => s + (b as { quantity: number }).quantity, 0);
-        await Product.updateOne({ _id: batch.productId, userId }, { $set: { stock: Math.round(sumQty*1000000)/1000000 } });
+
+        const allBatches = await Batch.find({ productId: v.pid, userId }).sort({ expiryDate: 1 }).lean();
+        const sumQty = allBatches.reduce((acc: number, b: { quantity: number }) => acc + b.quantity, 0);
+        const earliest = allBatches[0] as { expiryDate?: Date; batchNo?: string } | undefined;
+
+        await Product.updateOne(
+          { _id: v.pid, userId },
+          {
+            $set: {
+              stock: Math.round(sumQty * 1000000) / 1000000,
+              nearestExpiry: earliest?.expiryDate,
+              expiryDate: earliest?.expiryDate,
+              batchNo: earliest?.batchNo ?? "",
+            },
+          }
+        );
       }
     }
   } catch (err) {
