@@ -136,7 +136,7 @@ export default function PurchasesPage() {
           <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="🔍 Search medicine e.g. panadol" className="w-full border rounded-lg px-2 md:px-4 py-1 text-[11px] md:text-[15px] h-8 md:h-12 focus:ring-2 focus:ring-green-500 outline-none" />
           {loading && <p className="text-[10px] md:text-sm text-gray-400 mt-2">Searching...</p>}
           {products.length>0 && (
-            <div className="absolute left-2 right-2 md:left-4 md:right-4 top-[44px] md:top-[64px] bg-white border shadow-2xl rounded-xl z-[60] max-h-72 overflow-auto">
+            <div className="absolute left-2 right-2 md:left-4 md:right-4 top-11 md:top-16 bg-white border shadow-2xl rounded-xl z-60 max-h-72 overflow-auto">
               {products.map(p=>{
                 const displaySell = p.mainUnit === "box" ? p.sellPrice * (p.pattaPerBox||10) : p.sellPrice;
                 return (
