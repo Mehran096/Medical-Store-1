@@ -576,7 +576,7 @@ export default function SalesPage() {
             <button onClick={()=>{setProductSearch(""); setProductPage(1); searchRef.current?.focus();}} className="absolute right-2 top-1/2 -translate-y-1/2 bg-gray-100 hover:bg-gray-200 border rounded-full w-6 h-6 flex items-center justify-center text-[12px] font-bold text-gray-600">✕</button>
           )}
         </div>
-        <p className="text-[9px] text-gray-400 mb-2 px-1">Ctrl+F or / = Search | Enter = Sell first | Esc = Clear | Ctrl+S = Print</p>
+        <p className="text-[9px] text-gray-400 mb-2 px-1">Ctrl+F or / = Search | Enter = Sell first | Esc = Clear | Ctrl+S = Print | Ctrl+N = New Bill</p>
         {loadingProducts?(<div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-2">{[1,2,3,4,5,6].map(i=>(<div key={i} className="bg-white border rounded-xl p-2.5 animate-pulse"><div className="h-3 bg-gray-200 rounded w-3/4 mb-2"></div></div>))}</div>):(
           <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-2.5 mb-3">
             {products.map(p=>{
