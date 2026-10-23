@@ -32,7 +32,8 @@ function useIsOnline(){
   return useSyncExternalStore(subscribe, getSnapshot, getServerSnapshot);
 }
 function generateLocalId(){ return `local_${Date.now()}_${Math.random().toString(36).slice(2,9)}`; }
-function fmt(n:number, d=1){ if(isNaN(n)) return "0"; const v = Number(n); if(!Number.isFinite(v)) return "0"; return v % 1 === 0? v.toFixed(0) : v.toFixed(d).replace(/\.0+$/,""); }
+function rnd6(n:number){ return Math.round((n||0)*1000000)/1000000; }
+function fmt(n:number, d=1){ if(isNaN(n)) return "0"; const v = rnd6(Number(n)); if(!Number.isFinite(v)) return "0"; return v % 1 === 0? v.toFixed(0) : v.toFixed(d).replace(/\.0+$/,""); }
 function getExpiryStatus(e?: string): "expired" | "soon" | "ok" {
   if(!e) return "ok"; const now = new Date(); const exp = new Date(e);
   const diffDays = Math.ceil((exp.getTime() - now.getTime()) / 86400000);
@@ -46,10 +47,10 @@ function getSaleableBatches(p: Product){
 }
 function getSaleableStock(p: Product): number {
   const saleable = getSaleableBatches(p);
-  if(saleable.length>0) return saleable.reduce((s,b)=>s+b.quantity,0);
+  if(saleable.length>0) return rnd6(saleable.reduce((s,b)=>s+b.quantity,0));
   if(p.batches && p.batches.length>0) return 0;
   if(p.expiryDate && isExpired(p.expiryDate)) return 0;
-  return p.stock;
+  return rnd6(p.stock);
 }
 function getProductBuyPrice(p: Product): number {
   const saleable = getSaleableBatches(p);
@@ -114,9 +115,13 @@ export default function SalesPage() {
     return () => clearTimeout(t);
   }, []);
 
-  const expiryNotifications = useMemo(() => {
+    const expiryNotifications = useMemo(() => {
     if (nowMs === 0) return [];
-    return expiryProducts.map((p) => ({...p, status: getExpiryStatus(p.expiryDate), daysLeft: p.expiryDate? Math.ceil((new Date(p.expiryDate).getTime() - nowMs) / 86400000) : 999, })).filter((p) => p.status!== "ok").sort((a, b) => a.daysLeft - b.daysLeft);
+    return expiryProducts
+      .filter(p => p.stock > 0.0001)
+      .map((p) => ({...p, status: getExpiryStatus(p.expiryDate), daysLeft: p.expiryDate? Math.ceil((new Date(p.expiryDate).getTime() - nowMs) / 86400000) : 999, }))
+      .filter((p) => p.status!== "ok")
+      .sort((a, b) => a.daysLeft - b.daysLeft);
   }, [expiryProducts, nowMs]);
 
   const expiredCount = useMemo(() => expiryNotifications.filter((n) => n.status === "expired").length, [expiryNotifications]);
@@ -132,11 +137,11 @@ export default function SalesPage() {
   const getDefaultPrice = (p:Product, u:SellUnit):number => { 
     const ppb=p.pattaPerBox||10; 
     if(p.mainUnit==="box"){ 
-      if(u==="patta") return p.sellPrice; 
-      if(u==="half_patta") return Math.round((p.sellPrice/2)*100)/100; 
-      if(u==="box") return Math.round(p.sellPrice*ppb*10)/10; 
+      if(u==="patta") return rnd6(p.sellPrice); 
+      if(u==="half_patta") return rnd6(p.sellPrice/2); 
+      if(u==="box") return rnd6(p.sellPrice*ppb); 
     } 
-    return Math.round(p.sellPrice*10)/10; 
+    return rnd6(p.sellPrice); 
   };
 
   const getSellCalc = useCallback((p: Product) => {
@@ -155,7 +160,7 @@ export default function SalesPage() {
       else{ deductMain=qty; totalCalc=sellPrice*qty; profitCalc=(sellPrice-buyPrice)*qty; } 
     }
     else{ deductMain=qty; totalCalc=sellPrice*qty; profitCalc=(sellPrice-buyPrice)*qty; }
-    return { sellUnit, qty, sellPrice, defaultPrice, deductMain: Math.round(deductMain*1000000)/1000000, total: Math.round(totalCalc*100)/100, profit: Math.round(profitCalc*100)/100, buyPrice };
+    return { sellUnit, qty, sellPrice, defaultPrice, deductMain: rnd6(deductMain), total: rnd6(totalCalc), profit: rnd6(profitCalc), buyPrice };
   }, [sellUnitMap, qtyMap, priceMap]);
 
   const refreshSalesOnly = useCallback(async () => {
@@ -163,9 +168,9 @@ export default function SalesPage() {
     if(typeof window!=="undefined"&&!window.navigator.onLine){
       const offlineSales = await offlineDB.sales.reverse().toArray();
       const mapped:Sale[] = offlineSales.map(o=>({_id:o.localId,productId:o.productId,productName:o.productName,mainUnit:o.mainUnit as MainUnit,sellUnit:o.sellUnit as SellUnit,quantity:o.quantity,sellPrice:o.sellPrice,deductionMain:o.deductionMain,total:o.total,profit:o.profit,createdAt:o.createdAt,customerName:o.customerName,status:o.status,paymentType:o.paymentType,batchNo:o.batchNo}));
-      setSales(mapped); setTotal(mapped.reduce((a,b)=>a+b.total,0)); setProfit(mapped.reduce((a,b)=>a+b.profit,0)); setLoadingSales(false); return;
+      setSales(mapped); setTotal(rnd6(mapped.reduce((a,b)=>a+b.total,0))); setProfit(rnd6(mapped.reduce((a,b)=>a+b.profit,0))); setLoadingSales(false); return;
     }
-    try{ const res=await fetch(`/api/sales?filter=${filter}&page=1&limit=15`); const data=await res.json() as SalesApiResponse; setSales(data.sales); setTotal(data.total); setProfit(data.profit); setPendingTotal(data.pendingTotal??0); setPagination(data.pagination);}catch{ } setLoadingSales(false);
+    try{ const res=await fetch(`/api/sales?filter=${filter}&page=1&limit=15`); const data=await res.json() as SalesApiResponse; setSales(data.sales); setTotal(rnd6(data.total)); setProfit(rnd6(data.profit)); setPendingTotal(rnd6(data.pendingTotal??0)); setPagination(data.pagination);}catch{ } setLoadingSales(false);
   }, [filter]);
 
   const syncPendingSales = useCallback(async () => {
@@ -196,7 +201,7 @@ export default function SalesPage() {
             const bFor = allBatchesGlobal.filter(b=>b.productId===p._id || b.productId===p.localId);
             if(bFor.length>0){
               const saleable = bFor.filter(b=>b.quantity>0.0001 && new Date(b.expiryDate) >= new Date(new Date().setHours(0,0,0,0))).reduce((s,b)=>s+b.quantity,0);
-              return {...p, stock: Math.round(saleable*1000000)/1000000, batches: bFor.map(b=>({_id:b.localId, productId:b.productId, batchNo:b.batchNo, expiryDate:b.expiryDate, buyPrice:b.buyPrice, quantity:b.quantity})) };
+              return {...p, stock: rnd6(saleable), batches: bFor.map(b=>({_id:b.localId, productId:b.productId, batchNo:b.batchNo, expiryDate:b.expiryDate, buyPrice:b.buyPrice, quantity:b.quantity})) };
             }
             return {...p, batches: []};
           });
@@ -214,21 +219,18 @@ export default function SalesPage() {
 }
           setLoadingProducts(false); setLoadingMoreProducts(false); return;
         }
+        // ONLINE - V61 FIX: trust API, not stale offline cache
         const res=await fetch(`/api/products?search=${encodeURIComponent(productSearch)}&page=${productPage}&limit=${PRODUCTS_PER_PAGE}`,{signal:controller.signal});
         const data=await res.json() as ProductApiResponse | Product[]; 
         const list: Product[] = Array.isArray(data) ? data : data.products;
         if(cancelled) return;
         const withBatches = list.map(prod=>{
-          const bForProd = allBatchesGlobal.filter(b=>b.productId===prod._id);
-          if(bForProd.length>0){
-            const saleableSum = bForProd.filter(b=>b.quantity>0.0001 && new Date(b.expiryDate) >= new Date(new Date().setHours(0,0,0,0))).reduce((s,b)=>s+b.quantity,0);
-            return {
-              ...prod,
-              batches: bForProd.map(b=>({_id:b.localId, productId:b.productId, batchNo:b.batchNo, expiryDate:b.expiryDate, buyPrice:b.buyPrice, quantity:b.quantity})),
-              stock: bForProd.length>0 ? Math.round(saleableSum*1000000)/1000000 : prod.stock,
-            };
+          const apiBatches = (prod as unknown as { batches?: Product["batches"] }).batches || [];
+          if(apiBatches.length>0){
+            const saleableSum = rnd6(apiBatches.filter(b=>b.quantity>0.0001).reduce((s,b)=>s+b.quantity,0));
+            return {...prod, stock: saleableSum, batches: apiBatches};
           }
-          return prod;
+          return {...prod, stock: rnd6(prod.stock), batches: [] as Product["batches"]};
         });
         if(productPage===1) setProducts(withBatches); else setProducts(prev=>[...prev,...withBatches]); 
         if(!Array.isArray(data)&&data.pagination) setProductPagination(data.pagination);
@@ -236,6 +238,8 @@ export default function SalesPage() {
           const offlineUser = getOfflineUser(); const userId = offlineUser?._id?? "offline"; 
           const toCache = withBatches.map(p=>toOfflineProduct(p, userId)); 
           await offlineDB.products.bulkPut(toCache); 
+          // V61: clear old batches for these products then put fresh
+          for(const p of withBatches){ await offlineDB.batches.where("productId").equals(p._id).delete(); }
           const toCacheBatches = withBatches.flatMap(p=> (p.batches||[]).map(b=>({
             localId: b._id||`${p._id}_${b.batchNo}`, _id: b._id, productId: p._id, batchNo: b.batchNo, expiryDate: b.expiryDate, buyPrice: b.buyPrice, quantity: b.quantity, userId, synced: 1, createdAt: new Date().toISOString()
           } as OfflineBatch)));
@@ -293,9 +297,9 @@ export default function SalesPage() {
       try{
         if(typeof window!=="undefined"&&!window.navigator.onLine){
           const offlineAll=await offlineDB.sales.reverse().toArray(); const mapped=offlineAll.map(o=>({_id:o.localId,productId:o.productId,productName:o.productName,mainUnit:o.mainUnit as MainUnit,sellUnit:o.sellUnit as SellUnit,quantity:o.quantity,sellPrice:o.sellPrice,deductionMain:o.deductionMain,total:o.total,profit:o.profit,createdAt:o.createdAt,customerName:o.customerName,status:o.status,paymentType:o.paymentType,batchNo:o.batchNo}));
-          setSales(mapped); setTotal(mapped.reduce((a,b)=>a+b.total,0)); setProfit(mapped.reduce((a,b)=>a+b.profit,0)); setPagination({page:1,totalPages:1,hasMore:false,totalCount:mapped.length}); setLoadingSales(false); return;
+          setSales(mapped); setTotal(rnd6(mapped.reduce((a,b)=>a+b.total,0))); setProfit(rnd6(mapped.reduce((a,b)=>a+b.profit,0))); setPagination({page:1,totalPages:1,hasMore:false,totalCount:mapped.length}); setLoadingSales(false); return;
         }
-        const res=await fetch(`/api/sales?filter=${filter}&page=${page}&limit=15`,{signal:controller.signal}); const data=await res.json() as SalesApiResponse; if(page===1) setSales(data.sales); else setSales(prev=>[...prev,...data.sales]); setTotal(data.total); setProfit(data.profit); setPendingTotal(data.pendingTotal??0); setPagination(data.pagination);
+        const res=await fetch(`/api/sales?filter=${filter}&page=${page}&limit=15`,{signal:controller.signal}); const data=await res.json() as SalesApiResponse; if(page===1) setSales(data.sales); else setSales(prev=>[...prev,...data.sales]); setTotal(rnd6(data.total)); setProfit(rnd6(data.profit)); setPendingTotal(rnd6(data.pendingTotal??0)); setPagination(data.pagination);
       }catch(err){ if((err as Error).name!=="AbortError") console.error(err);} finally{ setLoadingSales(false); }
     }; void fetchData(); return()=>controller.abort();
   },[filter,page]);
@@ -312,7 +316,6 @@ export default function SalesPage() {
     }
     const calc = getSellCalc(p);
     const ppb = p.pattaPerBox && p.pattaPerBox>0 ? p.pattaPerBox : 10;
-
     const saleablePattaRaw = p.mainUnit === "box" ? saleableStock * ppb : saleableStock;
     let needPattaRaw = calc.qty;
     if (p.mainUnit === "box") {
@@ -320,117 +323,76 @@ export default function SalesPage() {
       else if (calc.sellUnit === "half_patta") needPattaRaw = calc.qty * 0.5;
       else if (calc.sellUnit === "box") needPattaRaw = calc.qty * ppb;
     }
-    const saleablePatta = Math.round(saleablePattaRaw * 1000000) / 1000000;
-    const needPatta = Math.round(needPattaRaw * 1000000) / 1000000;
-    const EPS = calc.sellUnit === "half_patta" ? 0.03 : 0.001;
-    if (saleablePatta + EPS < needPatta) {
-      alert(`Only ${saleablePatta.toFixed(3)} patta (${saleableStock.toFixed(3)} box) left, need ${needPatta.toFixed(1)} patta`);
+    if (rnd6(saleablePattaRaw) + (calc.sellUnit==="half_patta"?0.03:0.001) < rnd6(needPattaRaw)) {
+      alert(`Only ${saleablePattaRaw.toFixed(3)} patta (${saleableStock.toFixed(3)} box) left, need ${needPattaRaw.toFixed(1)} patta`);
       return;
     }
-
     const offlineUser = getOfflineUser();
     const finalCustomer = customerName.trim() || "Walk-in";
     const batchNo = getProductBatchNo(p);
     const batchObj = p.batches?.find((b) => b.batchNo === batchNo);
     const batchId = batchObj?._id || p._id;
 
-    setProducts((prev) =>
-      prev.map((prod) =>
-        prod._id === p._id
-          ? {
-              ...prod,
-              stock: (() => { const ns = prod.stock - calc.deductMain; return ns < 0.001 ? 0 : Math.round(ns*1000000)/1000000; })(),
-              batches: prod.batches?.map((b) => ({ ...b, quantity: b.batchNo === batchNo ? (()=>{ const nq = b.quantity - calc.deductMain; return nq < 0.001 ? 0 : Math.max(0, Math.round(nq*1000000)/1000000); })() : b.quantity })),
-            }
-          : prod
-      )
-    );
-    setExpiryProducts((prev) => prev.map((prod) => (prod.productId === p._id ? { ...prod, stock: (()=>{ const ns = prod.stock - calc.deductMain; return ns < 0.001 ? 0 : Math.round(ns*1000000)/1000000; })() } : prod)));
+    setProducts(prev => prev.map(prod => prod._id===p._id ? {...prod, stock: rnd6(prod.stock - calc.deductMain), batches: prod.batches?.map(b=> b.batchNo===batchNo ? {...b, quantity: rnd6(Math.max(0,b.quantity - calc.deductMain))} : b)} : prod));
+    setExpiryProducts(prev => prev.map(prod => {
+      if (prod.productId===p._id && prod.batchNo===batchNo) {
+        return {...prod, stock: rnd6(prod.stock - calc.deductMain)};
+      }
+      return prod;
+    }).filter(pr => pr.stock > 0.0001));
 
     const optimistic: Sale = {
-      _id: generateLocalId(),
-      productId: p._id,
-      productName: p.name,
-      mainUnit: p.mainUnit,
-      sellUnit: calc.sellUnit,
-      quantity: calc.qty,
-      sellPrice: calc.sellPrice,
-      deductionMain: calc.deductMain,
-      total: calc.total,
-      profit: calc.profit,
-      createdAt: new Date().toISOString(),
-      customerName: finalCustomer,
-      status: paymentType === "credit" ? "pending" : "paid",
-      paymentType,
-      batchNo,
+      _id: generateLocalId(), productId: p._id, productName: p.name, mainUnit: p.mainUnit, sellUnit: calc.sellUnit, quantity: calc.qty, sellPrice: calc.sellPrice, deductionMain: calc.deductMain, total: calc.total, profit: calc.profit, createdAt: new Date().toISOString(), customerName: finalCustomer, status: paymentType==="credit"?"pending":"paid", paymentType, batchNo,
     };
-    setSales((prev) => [optimistic, ...prev]);
-    setTotal((t) => t + calc.total);
-    setProfit((pr) => pr + calc.profit);
+    setSales(prev => [optimistic, ...prev]);
+    setTotal(t => rnd6(t + calc.total));
+    setProfit(pr => rnd6(pr + calc.profit));
+    if (paymentType==="credit") setPendingTotal(pt => rnd6(pt + calc.total));
 
     const newItem: CartItem = { name: p.name, qty: calc.qty, unit: calc.sellUnit, price: calc.sellPrice, total: calc.total };
-    setLastBill((prev) => {
+    setLastBill(prev => {
       const billNo = Date.now().toString().slice(-6);
       const timeStr = new Date().toLocaleString("en-PK", { timeZone: "Asia/Karachi" });
-      if (!prev) return { items: [newItem], total: newItem.total, customer: finalCustomer, time: timeStr, billNo };
-      if (prev.customer === finalCustomer) {
-        const items = [...prev.items, newItem];
-        return { items, total: items.reduce((a, b) => a + b.total, 0), customer: finalCustomer, time: prev.time, billNo: prev.billNo };
-      } else {
-        return { items: [newItem], total: newItem.total, customer: finalCustomer, time: timeStr, billNo };
-      }
+      if (!prev || prev.customer !== finalCustomer) return { items: [newItem], total: newItem.total, customer: finalCustomer, time: timeStr, billNo };
+      const items = [...prev.items, newItem];
+      return { items, total: rnd6(items.reduce((a,b)=>a+b.total,0)), customer: finalCustomer, time: prev.time, billNo: prev.billNo };
     });
 
     void (async () => {
       try {
         if (typeof window !== "undefined" && window.navigator.onLine) {
           const res = await fetch("/api/sales", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
+            method: "POST", headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
-              productId: p._id,
-              quantity: calc.qty,
-              sellUnit: calc.sellUnit,
-              mainUnit: p.mainUnit,
-              sellPrice: calc.sellPrice,
-              pattaPerBox: ppb,
-              mlPerBottle: p.mlPerBottle,
-              deductionMain: calc.deductMain,
-              batchId,
-              batchNo,
-              buyPriceMain: calc.buyPrice,
-              total: calc.total,
-              profit: calc.profit,
-              localId: optimistic._id,
-              customerName: finalCustomer,
-              paymentType,
+              productId: p._id, quantity: calc.qty, sellUnit: calc.sellUnit, mainUnit: p.mainUnit, sellPrice: calc.sellPrice, pattaPerBox: ppb, mlPerBottle: p.mlPerBottle, deductionMain: calc.deductMain, batchId, batchNo, buyPriceMain: calc.buyPrice, total: calc.total, profit: calc.profit, localId: optimistic._id, customerName: finalCustomer, paymentType, customerPhone: "", customerVillage: "",
             }),
           });
           if (res.ok) {
-            const saved = (await res.json()) as { _id: string };
-            setSales((prev) => prev.map((s) => (s._id === optimistic._id ? { ...s, _id: saved._id } : s)));
+            const saved = await res.json() as { _id: string };
+            setSales(prev => prev.map(s => s._id===optimistic._id ? {...s, _id: saved._id} : s));
             try{
               const bList = await offlineDB.batches.where("productId").equals(p._id).toArray();
               const first = bList.sort((a,b)=>new Date(a.expiryDate).getTime()-new Date(b.expiryDate).getTime())[0];
-              if(first) await offlineDB.batches.update(first.localId, { quantity: Math.max(0, Math.round((first.quantity - calc.deductMain)*1000000)/1000000) });
-              const sum = (await offlineDB.batches.where("productId").equals(p._id).toArray()).reduce((a,b)=>a+b.quantity,0);
-              await offlineDB.products.where("_id").equals(p._id).or("localId").equals(p._id).modify(pr=>{ pr.stock = Math.round(sum*1000000)/1000000; });
+              if(first) await offlineDB.batches.update(first.localId, { quantity: rnd6(Math.max(0, first.quantity - calc.deductMain)) });
+              const sum = rnd6((await offlineDB.batches.where("productId").equals(p._id).toArray()).reduce((a,b)=>a+b.quantity,0));
+              await offlineDB.products.where("_id").equals(p._id).or("localId").equals(p._id).modify(pr=>{ pr.stock = sum; });
+            }catch{}
+            try{
+              const r = await fetch(`/api/sales?filter=${filter}&page=1&limit=1`);
+              const d = await r.json() as SalesApiResponse;
+              setPendingTotal(rnd6(d.pendingTotal??0));
             }catch{}
           } else {
             await saveSaleOffline({
-              productId: p._id, productName: p.name, quantity: calc.qty, mainUnit: p.mainUnit, sellUnit: calc.sellUnit,
-              pattaPerBox: ppb, mlPerBottle: p.mlPerBottle, buyPriceMain: calc.buyPrice, sellPrice: calc.sellPrice,
-              userId: offlineUser?._id || "offline", customerName: finalCustomer, paymentType, batchId, batchNo, deductionMain: calc.deductMain,
+              productId: p._id, productName: p.name, quantity: calc.qty, mainUnit: p.mainUnit, sellUnit: calc.sellUnit, pattaPerBox: ppb, mlPerBottle: p.mlPerBottle, buyPriceMain: calc.buyPrice, sellPrice: calc.sellPrice, userId: offlineUser?._id || "offline", customerName: finalCustomer, customerPhone: "", customerVillage: "", paymentType, batchId, batchNo, deductionMain: calc.deductMain,
             });
-            setPendingCount((c) => c + 1);
+            setPendingCount(c=>c+1);
           }
         } else {
           await saveSaleOffline({
-            productId: p._id, productName: p.name, quantity: calc.qty, mainUnit: p.mainUnit, sellUnit: calc.sellUnit,
-            pattaPerBox: ppb, mlPerBottle: p.mlPerBottle, buyPriceMain: calc.buyPrice, sellPrice: calc.sellPrice,
-            userId: offlineUser?._id || "offline", customerName: finalCustomer, paymentType, batchId, batchNo, deductionMain: calc.deductMain,
+            productId: p._id, productName: p.name, quantity: calc.qty, mainUnit: p.mainUnit, sellUnit: calc.sellUnit, pattaPerBox: ppb, mlPerBottle: p.mlPerBottle, buyPriceMain: calc.buyPrice, sellPrice: calc.sellPrice, userId: offlineUser?._id || "offline", customerName: finalCustomer, customerPhone: "", customerVillage: "", paymentType, batchId, batchNo, deductionMain: calc.deductMain,
           });
-          setPendingCount((c) => c + 1);
+          setPendingCount(c=>c+1);
         }
       } catch {}
     })();
@@ -463,44 +425,32 @@ export default function SalesPage() {
     if (!confirm("Delete sale and restore stock?")) return;
     const saleToDelete = sales.find((s) => s._id === id);
     if (!saleToDelete) return;
-    const restore = saleToDelete.deductionMain ?? 0;
+    const restore = rnd6(saleToDelete.deductionMain ?? 0);
     setDeletingId(id);
-    setSales((prev) => prev.filter((s) => s._id !== id));
-    setTotal((t) => Math.max(0, t - saleToDelete.total));
-    setProfit((pr) => Math.max(0, pr - saleToDelete.profit));
-    setProducts((prev) =>
-      prev.map((prod) => {
-        if (prod._id !== saleToDelete.productId) return prod;
-        return {
-          ...prod,
-          stock: Math.round((prod.stock + restore) * 1000000) / 1000000,
-          batches: prod.batches?.map((b) => ({ ...b, quantity: Math.round((b.quantity + restore) * 1000000) / 1000000 })),
-        };
-      })
-    );
+    setSales(prev => prev.filter(s => s._id !== id));
+    setTotal(t => rnd6(Math.max(0, t - saleToDelete.total)));
+    setProfit(pr => rnd6(Math.max(0, pr - saleToDelete.profit)));
+    if (saleToDelete.status==="pending") setPendingTotal(pt => rnd6(Math.max(0, pt - saleToDelete.total)));
+    setProducts(prev => prev.map(prod => {
+      if (prod._id !== saleToDelete.productId) return prod;
+      return { ...prod, stock: rnd6(prod.stock + restore), batches: prod.batches?.map(b => ({ ...b, quantity: rnd6(b.quantity + restore) })) };
+    }));
     try {
       if (id.startsWith("local_")) {
         const s = await offlineDB.sales.get(id) || await offlineDB.sales.where("localId").equals(id).first();
-        if (!s) { setPendingCount((c) => Math.max(0, c - 1)); return; }
+        if (!s) { setPendingCount(c => Math.max(0, c - 1)); return; }
         if (s.batchId) {
           const b = await offlineDB.batches.where("localId").equals(s.batchId).first();
-          if (b) await offlineDB.batches.update(b.localId, { quantity: Math.round((b.quantity + restore)*1000000)/1000000 });
+          if (b) await offlineDB.batches.update(b.localId, { quantity: rnd6(b.quantity + restore) });
         }
         await offlineDB.sales.where("localId").equals(s.localId).delete();
         const remainingBatches = await offlineDB.batches.where("productId").equals(saleToDelete.productId).toArray();
-        const sum = remainingBatches.reduce((a,b)=>a+b.quantity,0);
-        await offlineDB.products.where("localId").equals(saleToDelete.productId).or("_id").equals(saleToDelete.productId).modify(p=>{ p.stock = Math.round(sum*1000000)/1000000; });
-        setPendingCount((c) => Math.max(0, c - 1));
+        const sum = rnd6(remainingBatches.reduce((a,b)=>a+b.quantity,0));
+        await offlineDB.products.where("localId").equals(saleToDelete.productId).or("_id").equals(saleToDelete.productId).modify(p=>{ p.stock = sum; });
+        setPendingCount(c => Math.max(0, c - 1));
       } else {
         const res = await fetch(`/api/sales/${id}`, { method: "DELETE" });
         if (!res.ok) throw new Error((await res.json()).error || "Delete failed");
-        try {
-          const bList = await offlineDB.batches.where("productId").equals(saleToDelete.productId).toArray();
-          const first = bList.sort((a,b)=>new Date(a.expiryDate).getTime()-new Date(b.expiryDate).getTime())[0];
-          if(first) await offlineDB.batches.update(first.localId, { quantity: Math.round((first.quantity + restore)*1000000)/1000000 });
-          const sum = (await offlineDB.batches.where("productId").equals(saleToDelete.productId).toArray()).reduce((a,b)=>a+b.quantity,0);
-          await offlineDB.products.where("_id").equals(saleToDelete.productId).or("localId").equals(saleToDelete.productId).modify(pr=>{ pr.stock = Math.round(sum*1000000)/1000000; });
-        } catch {}
         void refreshSalesOnly();
       }
     } catch (e) {
@@ -519,8 +469,8 @@ export default function SalesPage() {
       const data = await res.json() as { newStock?: number; error?: string };
       if (res.ok) {
         alert(`Discarded ${data.newStock !== undefined ? `New stock ${data.newStock}` : ""}`);
-        setExpiryProducts((prev) => prev.filter((p) => !(p.batchNo === n.batchNo && p.expiryDate === n.expiryDate && p.productId === n.productId)));
-        setProducts((prev) => prev.map((prod) => (prod._id === n.productId ? { ...prod, stock: data.newStock ?? Math.max(0, prod.stock - n.stock) } : prod)));
+        setExpiryProducts(prev => prev.filter(p => !(p.batchNo === n.batchNo && p.expiryDate === n.expiryDate && p.productId === n.productId)));
+        setProducts(prev => prev.map(prod => prod._id === n.productId ? { ...prod, stock: rnd6(data.newStock ?? Math.max(0, prod.stock - n.stock)) } : prod));
       } else alert(data.error || "Failed");
     } catch (err) { alert((err as Error).message); }
   };
@@ -531,7 +481,7 @@ export default function SalesPage() {
         <div className="max-w-7xl mx-auto flex flex-col gap-1.5">
           <div className="flex flex-wrap justify-between items-center gap-1">
             <div className="flex flex-wrap gap-2 items-center">
-              <h1 className="text-[11px] font-bold">💊 V49 FINAL {isOffline?"📶 Offline":""}</h1>
+              <h1 className="text-[11px] font-bold">💊 V61 FINAL {isOffline?"📶 Offline":""}</h1>
               {lastBill && (
                 <div className="flex gap-1">
                   <button onClick={()=>setShowPrint(true)} className="bg-green-600 hover:bg-green-700 text-white px-3 py-1.5 rounded-full text-[10px] font-bold animate-pulse shadow">🖨️ Print Bill ({lastBill.items.length} • Rs.{fmt(lastBill.total,0)})</button>
@@ -560,13 +510,18 @@ export default function SalesPage() {
       </div>
 
       <div className="max-w-7xl mx-auto p-2">
-        <input placeholder="🔍 Search medicine" value={productSearch} onChange={e=>{setProductSearch(e.target.value); setProductPage(1);}} className="border p-2.5 rounded-xl w-full bg-white text-[11px] h-10 mb-2 focus:ring-2 focus:ring-green-200 outline-none shadow-sm"/>
+                <div className="relative w-full mb-2">
+          <input placeholder="🔍 Search medicine" value={productSearch} onChange={e=>{setProductSearch(e.target.value); setProductPage(1);}} className="border p-2.5 pr-8 rounded-xl w-full bg-white text-[11px] h-10 focus:ring-2 focus:ring-green-200 outline-none shadow-sm"/>
+          {productSearch && (
+            <button onClick={()=>{setProductSearch(""); setProductPage(1);}} className="absolute right-2 top-1/2 -translate-y-1/2 bg-gray-100 hover:bg-gray-200 border rounded-full w-6 h-6 flex items-center justify-center text-[12px] font-bold text-gray-600">✕</button>
+          )}
+        </div>
         {loadingProducts?(<div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-2">{[1,2,3,4,5,6].map(i=>(<div key={i} className="bg-white border rounded-xl p-2.5 animate-pulse"><div className="h-3 bg-gray-200 rounded w-3/4 mb-2"></div></div>))}</div>):(
           <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-2.5 mb-3">
             {products.map(p=>{
               const calc=getSellCalc(p); const saleable=getSaleableStock(p); const out=saleable<=0.0001;
               const buyPrice = getProductBuyPrice(p);
-              const totalBuyStock = p.stock * buyPrice;
+              const totalBuyStock = rnd6(p.stock * buyPrice);
               const expiryStr = getProductExpiry(p);
               const expStatus = getExpiryStatus(expiryStr);
               const batchNoStr = getProductBatchNo(p);
