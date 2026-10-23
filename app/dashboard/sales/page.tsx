@@ -47,7 +47,7 @@ function getSaleableBatches(p: Product){
 function getSaleableStock(p: Product): number {
   const saleable = getSaleableBatches(p);
   if(saleable.length>0) return saleable.reduce((s,b)=>s+b.quantity,0);
-  if(p.batches && p.batches.length>0) return saleable.reduce((s,b)=>s+b.quantity,0);
+  if(p.batches && p.batches.length>0) return 0;
   if(p.expiryDate && isExpired(p.expiryDate)) return 0;
   return p.stock;
 }
@@ -139,7 +139,6 @@ export default function SalesPage() {
     return Math.round(p.sellPrice*10)/10; 
   };
 
-  // V33 FINAL: 6 decimals fixes 0.333333 and 0.166666 half_patta
   const getSellCalc = useCallback((p: Product) => {
     const sellUnit = (sellUnitMap[p._id] || getDefaultSellUnit(p.mainUnit)) as SellUnit;
     const qty = qtyMap[p._id] || 1; 
@@ -189,29 +188,38 @@ export default function SalesPage() {
       try{
         if(productPage===1) setLoadingProducts(true); else setLoadingMoreProducts(true);
         const isOfflineNow=typeof window!=="undefined"&&!window.navigator.onLine;
+        const allBatchesGlobal = await offlineDB.batches.toArray();
         if(isOfflineNow){
           const cached=await offlineDB.products.toArray();
           const filtered = productSearch? cached.filter(c=>c.name.toLowerCase().includes(productSearch.toLowerCase()) || (c.company||"").toLowerCase().includes(productSearch.toLowerCase())) : cached;
-          const totalCount = filtered.length; const totalPages = Math.ceil(totalCount / PRODUCTS_PER_PAGE) || 1;
-          const hasMore = productPage < totalPages; const pageSlice = filtered.slice(0, productPage * PRODUCTS_PER_PAGE);
+          const withStock = filtered.map(p=>{
+            const bFor = allBatchesGlobal.filter(b=>b.productId===p._id || b.productId===p.localId);
+            if(bFor.length>0){
+              const saleable = bFor.filter(b=>b.quantity>0.0001 && new Date(b.expiryDate) >= new Date(new Date().setHours(0,0,0,0))).reduce((s,b)=>s+b.quantity,0);
+              return {...p, stock: Math.round(saleable*1000000)/1000000, batches: bFor.map(b=>({_id:b.localId, productId:b.productId, batchNo:b.batchNo, expiryDate:b.expiryDate, buyPrice:b.buyPrice, quantity:b.quantity})) };
+            }
+            return {...p, batches: []};
+          });
+          const totalCount = withStock.length; const totalPages = Math.ceil(totalCount / PRODUCTS_PER_PAGE) || 1;
+          const hasMore = productPage < totalPages; const pageSlice = withStock.slice(0, productPage * PRODUCTS_PER_PAGE);
           if(!cancelled){ 
-            setProducts(pageSlice.map(c=>({
-              _id:c._id||c.localId, name:c.name, company:c.company, mainUnit:c.mainUnit as MainUnit,
-              pattaPerBox:c.pattaPerBox, mlPerBottle:c.mlPerBottle,
-              buyPrice:c.buyPriceAvg||0, buyPriceAvg:c.buyPriceAvg||0, sellPrice:c.sellPrice, stock:c.stock, rack:c.rack,
-              batches: [],
-            }))); 
-            setProductPagination({ page: productPage, totalPages, hasMore, totalCount }); 
-          }
+  type CachedWithBatches = typeof withStock[number];
+  setProducts(pageSlice.map((c: CachedWithBatches)=>({
+    _id:c._id||c.localId, name:c.name, company:c.company, mainUnit:c.mainUnit as MainUnit,
+    pattaPerBox:c.pattaPerBox, mlPerBottle:c.mlPerBottle,
+    buyPrice:c.buyPriceAvg||0, buyPriceAvg:c.buyPriceAvg||0, sellPrice:c.sellPrice, stock:c.stock, rack:c.rack,
+    batches: c.batches||[],
+  }))); 
+  setProductPagination({ page: productPage, totalPages, hasMore, totalCount }); 
+}
           setLoadingProducts(false); setLoadingMoreProducts(false); return;
         }
         const res=await fetch(`/api/products?search=${encodeURIComponent(productSearch)}&page=${productPage}&limit=${PRODUCTS_PER_PAGE}`,{signal:controller.signal});
         const data=await res.json() as ProductApiResponse | Product[]; 
         const list: Product[] = Array.isArray(data) ? data : data.products;
         if(cancelled) return;
-        const batchList: OfflineBatch[] = await offlineDB.batches.toArray();
         const withBatches = list.map(prod=>{
-          const bForProd = batchList.filter(b=>b.productId===prod._id);
+          const bForProd = allBatchesGlobal.filter(b=>b.productId===prod._id);
           if(bForProd.length>0){
             const saleableSum = bForProd.filter(b=>b.quantity>0.0001 && new Date(b.expiryDate) >= new Date(new Date().setHours(0,0,0,0))).reduce((s,b)=>s+b.quantity,0);
             return {
@@ -228,6 +236,10 @@ export default function SalesPage() {
           const offlineUser = getOfflineUser(); const userId = offlineUser?._id?? "offline"; 
           const toCache = withBatches.map(p=>toOfflineProduct(p, userId)); 
           await offlineDB.products.bulkPut(toCache); 
+          const toCacheBatches = withBatches.flatMap(p=> (p.batches||[]).map(b=>({
+            localId: b._id||`${p._id}_${b.batchNo}`, _id: b._id, productId: p._id, batchNo: b.batchNo, expiryDate: b.expiryDate, buyPrice: b.buyPrice, quantity: b.quantity, userId, synced: 1, createdAt: new Date().toISOString()
+          } as OfflineBatch)));
+          if(toCacheBatches.length>0) await offlineDB.batches.bulkPut(toCacheBatches);
         }
       }catch(err){ if((err as Error).name!=="AbortError") console.error(err);} finally{ if(!cancelled){ setLoadingProducts(false); setLoadingMoreProducts(false);} }
     }; void loadProducts(); return()=>{ cancelled=true; controller.abort(); };
@@ -322,7 +334,6 @@ export default function SalesPage() {
     const batchObj = p.batches?.find((b) => b.batchNo === batchNo);
     const batchId = batchObj?._id || p._id;
 
-    // V33 FINAL: 6 decimals, clamp 0.001
     setProducts((prev) =>
       prev.map((prod) =>
         prod._id === p._id
@@ -398,15 +409,19 @@ export default function SalesPage() {
           if (res.ok) {
             const saved = (await res.json()) as { _id: string };
             setSales((prev) => prev.map((s) => (s._id === optimistic._id ? { ...s, _id: saved._id } : s)));
+            try{
+              const bList = await offlineDB.batches.where("productId").equals(p._id).toArray();
+              const first = bList.sort((a,b)=>new Date(a.expiryDate).getTime()-new Date(b.expiryDate).getTime())[0];
+              if(first) await offlineDB.batches.update(first.localId, { quantity: Math.max(0, Math.round((first.quantity - calc.deductMain)*1000000)/1000000) });
+              const sum = (await offlineDB.batches.where("productId").equals(p._id).toArray()).reduce((a,b)=>a+b.quantity,0);
+              await offlineDB.products.where("_id").equals(p._id).or("localId").equals(p._id).modify(pr=>{ pr.stock = Math.round(sum*1000000)/1000000; });
+            }catch{}
           } else {
             await saveSaleOffline({
               productId: p._id, productName: p.name, quantity: calc.qty, mainUnit: p.mainUnit, sellUnit: calc.sellUnit,
               pattaPerBox: ppb, mlPerBottle: p.mlPerBottle, buyPriceMain: calc.buyPrice, sellPrice: calc.sellPrice,
               userId: offlineUser?._id || "offline", customerName: finalCustomer, paymentType, batchId, batchNo, deductionMain: calc.deductMain,
             });
-            const bList = await offlineDB.batches.where("productId").equals(p._id).toArray();
-            const first = bList.sort((a,b)=>new Date(a.expiryDate).getTime()-new Date(b.expiryDate).getTime())[0];
-            if(first) await offlineDB.batches.update(first.localId, { quantity: Math.max(0, Math.round((first.quantity - calc.deductMain)*1000000)/1000000) });
             setPendingCount((c) => c + 1);
           }
         } else {
@@ -415,9 +430,6 @@ export default function SalesPage() {
             pattaPerBox: ppb, mlPerBottle: p.mlPerBottle, buyPriceMain: calc.buyPrice, sellPrice: calc.sellPrice,
             userId: offlineUser?._id || "offline", customerName: finalCustomer, paymentType, batchId, batchNo, deductionMain: calc.deductMain,
           });
-          const bList = await offlineDB.batches.where("productId").equals(p._id).toArray();
-          const first = bList.sort((a,b)=>new Date(a.expiryDate).getTime()-new Date(b.expiryDate).getTime())[0];
-          if(first) await offlineDB.batches.update(first.localId, { quantity: Math.max(0, Math.round((first.quantity - calc.deductMain)*1000000)/1000000) });
           setPendingCount((c) => c + 1);
         }
       } catch {}
@@ -456,7 +468,6 @@ export default function SalesPage() {
     setSales((prev) => prev.filter((s) => s._id !== id));
     setTotal((t) => Math.max(0, t - saleToDelete.total));
     setProfit((pr) => Math.max(0, pr - saleToDelete.profit));
-    // V33 FINAL: 6 decimals
     setProducts((prev) =>
       prev.map((prod) => {
         if (prod._id !== saleToDelete.productId) return prod;
@@ -478,7 +489,7 @@ export default function SalesPage() {
         await offlineDB.sales.where("localId").equals(s.localId).delete();
         const remainingBatches = await offlineDB.batches.where("productId").equals(saleToDelete.productId).toArray();
         const sum = remainingBatches.reduce((a,b)=>a+b.quantity,0);
-        await offlineDB.products.where("localId").equals(saleToDelete.productId).modify(p=>{ p.stock = Math.round(sum*1000000)/1000000; });
+        await offlineDB.products.where("localId").equals(saleToDelete.productId).or("_id").equals(saleToDelete.productId).modify(p=>{ p.stock = Math.round(sum*1000000)/1000000; });
         setPendingCount((c) => Math.max(0, c - 1));
       } else {
         const res = await fetch(`/api/sales/${id}`, { method: "DELETE" });
@@ -487,6 +498,8 @@ export default function SalesPage() {
           const bList = await offlineDB.batches.where("productId").equals(saleToDelete.productId).toArray();
           const first = bList.sort((a,b)=>new Date(a.expiryDate).getTime()-new Date(b.expiryDate).getTime())[0];
           if(first) await offlineDB.batches.update(first.localId, { quantity: Math.round((first.quantity + restore)*1000000)/1000000 });
+          const sum = (await offlineDB.batches.where("productId").equals(saleToDelete.productId).toArray()).reduce((a,b)=>a+b.quantity,0);
+          await offlineDB.products.where("_id").equals(saleToDelete.productId).or("localId").equals(saleToDelete.productId).modify(pr=>{ pr.stock = Math.round(sum*1000000)/1000000; });
         } catch {}
         void refreshSalesOnly();
       }
@@ -518,7 +531,7 @@ export default function SalesPage() {
         <div className="max-w-7xl mx-auto flex flex-col gap-1.5">
           <div className="flex flex-wrap justify-between items-center gap-1">
             <div className="flex flex-wrap gap-2 items-center">
-              <h1 className="text-[11px] font-bold">💊 V33 FINAL {isOffline?"📶 Offline":""}</h1>
+              <h1 className="text-[11px] font-bold">💊 V49 FINAL {isOffline?"📶 Offline":""}</h1>
               {lastBill && (
                 <div className="flex gap-1">
                   <button onClick={()=>setShowPrint(true)} className="bg-green-600 hover:bg-green-700 text-white px-3 py-1.5 rounded-full text-[10px] font-bold animate-pulse shadow">🖨️ Print Bill ({lastBill.items.length} • Rs.{fmt(lastBill.total,0)})</button>

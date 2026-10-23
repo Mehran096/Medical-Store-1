@@ -39,7 +39,7 @@ export async function saveSaleOffline(saleData: OfflineSaleData): Promise<string
   const ppb = saleData.pattaPerBox || 10;
   const mlB = saleData.mlPerBottle || 120;
   const ded = calcDeduction(saleData.mainUnit, saleData.sellUnit, saleData.quantity, ppb, mlB);
-  const needMain = Math.round(ded.main * 1000) / 1000;
+  const needMain = Math.round(ded.main * 1000000) / 1000000;
 
   const today = new Date();
   today.setHours(0, 0, 0, 0);
@@ -53,8 +53,8 @@ export async function saveSaleOffline(saleData: OfflineSaleData): Promise<string
   allBatches.sort((a, b) => new Date(a.expiryDate).getTime() - new Date(b.expiryDate).getTime());
 
   const totalBatchQty = allBatches.reduce((s, b) => s + b.quantity, 0);
-  if (allBatches.length === 0 || totalBatchQty < needMain - 0.0001) {
-    throw new Error(`Only ${totalBatchQty.toFixed(2)} ${saleData.mainUnit} left (expired excluded)`);
+  if (allBatches.length === 0 || totalBatchQty < needMain - 0.000001) {
+    throw new Error(`Only ${totalBatchQty.toFixed(3)} ${saleData.mainUnit} left (expired excluded)`);
   }
 
   const nowISO = new Date().toISOString();
@@ -81,14 +81,17 @@ export async function saveSaleOffline(saleData: OfflineSaleData): Promise<string
     profit = (saleData.sellPrice - firstBatch.buyPrice) * saleData.quantity;
   }
 
+  total = Math.round(total * 1000000) / 1000000;
+  profit = Math.round(profit * 1000000) / 1000000;
+
   let createdId = "";
   await offlineDB.transaction("rw", offlineDB.batches, offlineDB.sales, offlineDB.products, offlineDB.customers, offlineDB.syncQueue, async () => {
     let remaining = needMain;
     for (const batch of allBatches) {
-      if (remaining <= 0) break;
+      if (remaining <= 0.000001) break;
       const take = Math.min(batch.quantity, remaining);
-      await offlineDB.batches.update(batch.localId, { quantity: Math.round((batch.quantity - take) * 1000) / 1000 });
-      remaining = Math.round((remaining - take) * 1000) / 1000;
+      await offlineDB.batches.update(batch.localId, { quantity: Math.round((batch.quantity - take) * 1000000) / 1000000 });
+      remaining = Math.round((remaining - take) * 1000000) / 1000000;
     }
 
     const localId = genLocalId();
@@ -109,10 +112,10 @@ export async function saveSaleOffline(saleData: OfflineSaleData): Promise<string
       mlPerBottle: mlB,
       buyPriceMain: firstBatch.buyPrice,
       sellPrice: saleData.sellPrice,
-      total: Math.round(total),
-      profit: Math.round(profit),
+      total,
+      profit,
       deductionMain: needMain,
-      deductionPatta: ded.patta,
+      deductionPatta: Math.round(ded.patta * 1000000) / 1000000,
       userId: saleData.userId,
       createdAt: nowISO,
       synced: 0,
@@ -136,9 +139,7 @@ export async function saveSaleOffline(saleData: OfflineSaleData): Promise<string
       try {
         const customerLocalId = await upsertOfflineCustomer(newSale, saleData.customerVillage ?? "", saleData.customerPhone ?? "");
         if (customerLocalId) await offlineDB.sales.update(localId, { customerId: customerLocalId });
-      } catch {
-        // ignore khata error offline
-      }
+      } catch {}
     }
   });
 
@@ -146,9 +147,7 @@ export async function saveSaleOffline(saleData: OfflineSaleData): Promise<string
     try {
       const reg = await navigator.serviceWorker.ready;
       if (isSyncRegistration(reg)) await reg.sync.register("sync-sales");
-    } catch {
-      // ignore
-    }
+    } catch {}
   }
   return [createdId];
 }
@@ -171,9 +170,7 @@ export async function wusoolOffline(customerLocalId: string, amount: number, not
       synced: 0,
     });
     for (const sId of customer.saleIds ?? []) {
-      await offlineDB.sales.update(sId, { status: "paid", isCredit: false }).catch(() => {
-        // ignore
-      });
+      await offlineDB.sales.update(sId, { status: "paid", isCredit: false }).catch(() => {});
     }
   } else {
     await offlineDB.customers.update(customerLocalId, {
@@ -223,6 +220,10 @@ export async function syncOfflineSales(): Promise<{ synced: number; failed: numb
         await offlineDB.sales.update(sale.localId, { synced: 1 });
         synced++;
       } else {
+        const txt = await res.text();
+        if (txt.includes("Batch only") || txt.includes("expired")) {
+          break;
+        }
         failed++;
       }
     } catch {

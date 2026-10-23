@@ -152,15 +152,17 @@ export const offlineDB = new OfflineDB();
 export const db = offlineDB;
 
 export function calcDeduction(main: MainUnit, sell: SellUnit, qty: number, ppb: number, mlB: number): { main: number; patta: number } {
+  let m = 0; let p = 0;
   if (main === "box") {
-    if (sell === "patta") return { main: qty / ppb, patta: qty };
-    if (sell === "half_patta") return { main: (qty * 0.5) / ppb, patta: qty * 0.5 };
-    if (sell === "box") return { main: qty, patta: qty * ppb };
+    if (sell === "patta") { m = qty / ppb; p = qty; }
+    else if (sell === "half_patta") { m = (qty * 0.5) / ppb; p = qty * 0.5; }
+    else { m = qty; p = qty * ppb; }
+  } else if (main === "bottle" && sell === "ml") {
+    m = qty / mlB; p = 0;
+  } else {
+    m = qty; p = 0;
   }
-  if (main === "bottle" && sell === "ml") {
-    return { main: qty / mlB, patta: 0 };
-  }
-  return { main: qty, patta: 0 };
+  return { main: Math.round(m * 1000000)/1000000, patta: Math.round(p * 1000000)/1000000 };
 }
 
 export async function getExpiringBatches(userId: string, days = 90): Promise<OfflineBatch[]> {
@@ -278,10 +280,11 @@ export async function upsertOfflineCustomer(sale: OfflineSale, village = "", pho
   const normalized = name.toLowerCase();
   const candidates = await offlineDB.customers.where("normalizedName").equals(normalized).toArray();
   const existing = candidates.find((c) => !c.isPaid) || null;
+  const exactTotal = Math.round(sale.total * 1000000) / 1000000;
   if (existing) {
     await offlineDB.customers.update(existing.localId, {
-      totalUdhar: Math.round((existing.totalUdhar || 0) + sale.total),
-      totalBusiness: Math.round((existing.totalBusiness || 0) + sale.total),
+      totalUdhar: Math.round((existing.totalUdhar + exactTotal) * 1000000)/1000000,
+      totalBusiness: Math.round((existing.totalBusiness + exactTotal) * 1000000)/1000000,
       saleIds: [...(existing.saleIds || []), sale.localId],
       billsCount: (existing.billsCount || 1) + 1,
       lastUdharDate: new Date().toISOString(),
@@ -291,21 +294,12 @@ export async function upsertOfflineCustomer(sale: OfflineSale, village = "", pho
   } else {
     const localId = `cust_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
     await offlineDB.customers.add({
-      localId,
-      saleIds: [sale.localId],
-      name,
-      normalizedName: normalized,
-      phone,
-      village,
-      totalUdhar: Math.round(sale.total),
-      totalBusiness: Math.round(sale.total),
+      localId, saleIds: [sale.localId], name, normalizedName: normalized,
+      phone, village,
+      totalUdhar: exactTotal, totalBusiness: exactTotal,
       lastUdharDate: new Date().toISOString(),
-      synced: 0,
-      createdAt: new Date().toISOString(),
-      billsCount: 1,
-      isPaid: false,
-      paidAmount: 0,
-      wusoolHistory: [],
+      synced: 0, createdAt: new Date().toISOString(), billsCount: 1,
+      isPaid: false, paidAmount: 0, wusoolHistory: [],
     });
     return localId;
   }

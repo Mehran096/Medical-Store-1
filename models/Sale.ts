@@ -64,13 +64,12 @@ SaleSchema.pre("validate", function () {
   const ppb = this.pattaPerBox && this.pattaPerBox > 0 ? this.pattaPerBox : 10;
   const mlB = this.mlPerBottle && this.mlPerBottle > 0 ? this.mlPerBottle : 120;
 
-  // If client already provided deductionMain for batchId flow, keep it
-  const hasClientDeduction = this.deductionMain > 0.0001 && Boolean(this.batchId);
+  // V46: Use 6 decimals for deductions, not 3
+  const hasClientDeduction = this.deductionMain > 0.000001 && Boolean(this.batchId);
 
   if (!hasClientDeduction) {
     let deductMain = 0;
     let deductPatta = 0;
-
     if (this.mainUnit === "box") {
       if (this.sellUnit === "patta") {
         deductMain = qty / ppb;
@@ -83,32 +82,30 @@ SaleSchema.pre("validate", function () {
         deductPatta = qty * ppb;
       }
     } else if (this.mainUnit === "bottle") {
-      if (this.sellUnit === "ml") {
-        deductMain = qty / mlB;
-      } else {
-        deductMain = qty;
-      }
+      deductMain = this.sellUnit === "ml" ? qty / mlB : qty;
     } else {
       deductMain = qty;
     }
-
-    this.deductionMain = Math.round(deductMain * 1000) / 1000;
-    this.deductionPatta = Math.round(deductPatta * 1000) / 1000;
+    this.deductionMain = Math.round(deductMain * 1000000) / 1000000;
+    this.deductionPatta = Math.round(deductPatta * 1000000) / 1000000;
+  } else {
+    // Even if client sent it, normalize to 6 decimals
+    this.deductionMain = Math.round(this.deductionMain * 1000000) / 1000000;
+    this.deductionPatta = Math.round(this.deductionPatta * 1000000) / 1000000;
   }
 
-  // Always recalc total/profit from buyPriceMain to prevent drift
+  // V46: Keep EXACT total/profit, don't round to 1 decimal
+  // Exact 66.666666*15 = 1000 exact
   let total = 0;
   let profit = 0;
-
   if (this.mainUnit === "box") {
     const buyPerPatta = this.buyPriceMain / ppb;
-    const buyPerHalf = buyPerPatta / 2;
     if (this.sellUnit === "patta") {
       total = this.sellPrice * qty;
       profit = (this.sellPrice - buyPerPatta) * qty;
     } else if (this.sellUnit === "half_patta") {
       total = this.sellPrice * qty;
-      profit = (this.sellPrice - buyPerHalf) * qty;
+      profit = (this.sellPrice - buyPerPatta/2) * qty;
     } else {
       total = this.sellPrice * qty;
       profit = (this.sellPrice - this.buyPriceMain) * qty;
@@ -127,8 +124,9 @@ SaleSchema.pre("validate", function () {
     profit = (this.sellPrice - this.buyPriceMain) * qty;
   }
 
-  this.total = Math.round(total * 10) / 10;
-  this.profit = Math.round(profit * 10) / 10;
+  // V46: 6 decimals, not 1 decimal
+  this.total = Math.round(total * 1000000) / 1000000;
+  this.profit = Math.round(profit * 1000000) / 1000000;
 });
 
 SaleSchema.index({ userId: 1, createdAt: -1 });
