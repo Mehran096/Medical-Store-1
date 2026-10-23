@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useState, useMemo, useCallback, useSyncExternalStore } from "react";
+import { useEffect, useState, useMemo, useCallback, useSyncExternalStore, useRef } from "react";
 import { offlineDB } from "@/lib/offline-db";
 import type { OfflineBatch } from "@/lib/offline-db";
 import { saveSaleOffline, syncOfflineSales } from "@/lib/offline-sync";
@@ -109,13 +109,14 @@ export default function SalesPage() {
   const [showExpiry, setShowExpiry] = useState(false); const [nowMs, setNowMs] = useState(0);
   const [lastBill, setLastBill] = useState<BillType | null>(null);
   const [showPrint, setShowPrint] = useState(false);
+  const searchRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => { 
     const t = setTimeout(() => { setMounted(true); setNowMs(Date.now()); }, 0);
     return () => clearTimeout(t);
   }, []);
 
-    const expiryNotifications = useMemo(() => {
+  const expiryNotifications = useMemo(() => {
     if (nowMs === 0) return [];
     return expiryProducts
       .filter(p => p.stock > 0.0001)
@@ -128,12 +129,12 @@ export default function SalesPage() {
   const soonCount = useMemo(() => expiryNotifications.filter((n) => n.status === "soon").length, [expiryNotifications]);
 
   const sellOptions = (main: MainUnit): SellUnit[] => { 
-    if (main === "box") return ["patta", "half_patta", "box"]; 
+    if (main === "box") return ["box", "patta", "half_patta"]; 
     if (main === "bottle") return ["bottle"];
     if (main === "tube") return ["tube"]; 
     return ["piece"]; 
   };
-  const getDefaultSellUnit = (main: MainUnit): SellUnit => main==="box"?"patta":main as SellUnit;
+  const getDefaultSellUnit = (main: MainUnit): SellUnit => main==="box"?"box":main as SellUnit;
   const getDefaultPrice = (p:Product, u:SellUnit):number => { 
     const ppb=p.pattaPerBox||10; 
     if(p.mainUnit==="box"){ 
@@ -219,7 +220,6 @@ export default function SalesPage() {
 }
           setLoadingProducts(false); setLoadingMoreProducts(false); return;
         }
-        // ONLINE - V61 FIX: trust API, not stale offline cache
         const res=await fetch(`/api/products?search=${encodeURIComponent(productSearch)}&page=${productPage}&limit=${PRODUCTS_PER_PAGE}`,{signal:controller.signal});
         const data=await res.json() as ProductApiResponse | Product[]; 
         const list: Product[] = Array.isArray(data) ? data : data.products;
@@ -238,7 +238,6 @@ export default function SalesPage() {
           const offlineUser = getOfflineUser(); const userId = offlineUser?._id?? "offline"; 
           const toCache = withBatches.map(p=>toOfflineProduct(p, userId)); 
           await offlineDB.products.bulkPut(toCache); 
-          // V61: clear old batches for these products then put fresh
           for(const p of withBatches){ await offlineDB.batches.where("productId").equals(p._id).delete(); }
           const toCacheBatches = withBatches.flatMap(p=> (p.batches||[]).map(b=>({
             localId: b._id||`${p._id}_${b.batchNo}`, _id: b._id, productId: p._id, batchNo: b.batchNo, expiryDate: b.expiryDate, buyPrice: b.buyPrice, quantity: b.quantity, userId, synced: 1, createdAt: new Date().toISOString()
@@ -285,6 +284,8 @@ export default function SalesPage() {
               buyPrice: b.buyPrice, buyPriceAvg: b.buyPrice, sellPrice: b.sellPrice || 0,
               stock: b.quantity, expiryDate: b.expiryDate, batchNo: b.batchNo
             })));
+          } else {
+            if(batches.length===0) setExpiryProducts([]);
           }
         }
       } catch { } }; void loadAllForExpiry();
@@ -304,7 +305,7 @@ export default function SalesPage() {
     }; void fetchData(); return()=>controller.abort();
   },[filter,page]);
 
-  const sell = (p: Product) => {
+  const sell = useCallback((p: Product) => {
     const saleableStock = getSaleableStock(p);
     if (saleableStock <= 0.0001 && p.stock > 0.0001) {
       alert(`⚠️ ${p.name} has only expired stock (Total ${p.stock}). Discard expired first.`);
@@ -396,9 +397,18 @@ export default function SalesPage() {
         }
       } catch {}
     })();
-  };
+  }, [getSellCalc, filter, customerName, paymentType]);
 
-  const clearCart = () => { setLastBill(null); setShowPrint(false); };
+       
+
+  const clearCart = () => { 
+    setLastBill(null); 
+    setShowPrint(false); 
+    setCustomerName("Walk-in");
+    setProductSearch("");
+    setProductPage(1);
+    searchRef.current?.focus();
+  };
   const handleDirectPrint = useCallback(()=>{
     const content = document.getElementById('print-area')?.innerHTML;
     if(!content) return;
@@ -411,6 +421,7 @@ export default function SalesPage() {
     doc.open(); doc.write(printHtml); doc.close();
     setTimeout(()=>{ iframe.contentWindow?.focus(); iframe.contentWindow?.print(); setTimeout(()=>{ try{document.body.removeChild(iframe)}catch{} },1000); }, 500);
   },[lastBill]);
+  
   const handleDialogPrint = useCallback(()=>{
     const content = document.getElementById('print-area')?.innerHTML;
     if(!content) return;
@@ -419,6 +430,55 @@ export default function SalesPage() {
     if(!w){ alert("Please allow popups"); return; }
     w.document.open(); w.document.write(printHtml); w.document.close();
   },[lastBill]);
+
+
+    // POS KEYBOARD SHORTCUTS - clean, no eslint warning
+  useEffect(()=>{
+    function onKey(e: KeyboardEvent){
+      if(e.key==="F2" || (e.ctrlKey && e.key.toLowerCase()==="f") || e.key==="/"){
+        const active = document.activeElement as HTMLElement;
+        const isCustomerInput = active?.tagName==="INPUT" && (active as HTMLInputElement).placeholder?.includes("customer");
+        if(isCustomerInput) return;
+        e.preventDefault();
+        searchRef.current?.focus();
+      }
+      //for printing last bill, ctrl+s
+      if((e.ctrlKey && e.key.toLowerCase()==="s")){
+        if(lastBill){
+          e.preventDefault();
+          setShowPrint(true);
+          setTimeout(()=>{
+            handleDirectPrint();
+          }, 350);
+        }
+      }
+            // Ctrl+N = New Bill without printing (customer no bill)
+      if(e.ctrlKey && e.key.toLowerCase()==="n"){
+        e.preventDefault();
+        if(lastBill){
+          setLastBill(null);
+          setShowPrint(false);
+          setCustomerName("Walk-in");
+          setProductSearch("");
+          searchRef.current?.focus();
+        }
+      }
+      if(e.key==="Escape"){
+        setProductSearch("");
+        setProductPage(1);
+        searchRef.current?.focus();
+      }
+      if(e.key==="Enter" && !e.ctrlKey && productSearch && products.length>0 && document.activeElement===searchRef.current){
+        e.preventDefault();
+        const first = products[0];
+        if(first) sell(first);
+      }
+    }
+    window.addEventListener("keydown", onKey);
+    return ()=>{
+      window.removeEventListener("keydown", onKey);
+    };
+  },[productSearch, products, sell, lastBill, handleDirectPrint]);
 
   const handleDeleteSale = async (id: string) => {
     if (deletingId) return;
@@ -481,7 +541,7 @@ export default function SalesPage() {
         <div className="max-w-7xl mx-auto flex flex-col gap-1.5">
           <div className="flex flex-wrap justify-between items-center gap-1">
             <div className="flex flex-wrap gap-2 items-center">
-              <h1 className="text-[11px] font-bold">💊 V61 FINAL {isOffline?"📶 Offline":""}</h1>
+              <h1 className="text-[11px] font-bold">💊 V63 POS {isOffline?"📶 Offline":""}</h1>
               {lastBill && (
                 <div className="flex gap-1">
                   <button onClick={()=>setShowPrint(true)} className="bg-green-600 hover:bg-green-700 text-white px-3 py-1.5 rounded-full text-[10px] font-bold animate-pulse shadow">🖨️ Print Bill ({lastBill.items.length} • Rs.{fmt(lastBill.total,0)})</button>
@@ -510,12 +570,13 @@ export default function SalesPage() {
       </div>
 
       <div className="max-w-7xl mx-auto p-2">
-                <div className="relative w-full mb-2">
-          <input placeholder="🔍 Search medicine" value={productSearch} onChange={e=>{setProductSearch(e.target.value); setProductPage(1);}} className="border p-2.5 pr-8 rounded-xl w-full bg-white text-[11px] h-10 focus:ring-2 focus:ring-green-200 outline-none shadow-sm"/>
+        <div className="relative w-full mb-2">
+          <input ref={searchRef} placeholder="🔍 Search medicine (Ctrl+F or /) - Enter to sell first" value={productSearch} onChange={e=>{setProductSearch(e.target.value); setProductPage(1);}} className="border p-2.5 pr-8 rounded-xl w-full bg-white text-[11px] h-10 focus:ring-2 focus:ring-green-200 outline-none shadow-sm"/>
           {productSearch && (
-            <button onClick={()=>{setProductSearch(""); setProductPage(1);}} className="absolute right-2 top-1/2 -translate-y-1/2 bg-gray-100 hover:bg-gray-200 border rounded-full w-6 h-6 flex items-center justify-center text-[12px] font-bold text-gray-600">✕</button>
+            <button onClick={()=>{setProductSearch(""); setProductPage(1); searchRef.current?.focus();}} className="absolute right-2 top-1/2 -translate-y-1/2 bg-gray-100 hover:bg-gray-200 border rounded-full w-6 h-6 flex items-center justify-center text-[12px] font-bold text-gray-600">✕</button>
           )}
         </div>
+        <p className="text-[9px] text-gray-400 mb-2 px-1">Ctrl+F or / = Search | Enter = Sell first | Esc = Clear | Ctrl+S = Print</p>
         {loadingProducts?(<div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-2">{[1,2,3,4,5,6].map(i=>(<div key={i} className="bg-white border rounded-xl p-2.5 animate-pulse"><div className="h-3 bg-gray-200 rounded w-3/4 mb-2"></div></div>))}</div>):(
           <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-2.5 mb-3">
             {products.map(p=>{
