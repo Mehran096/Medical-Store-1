@@ -22,6 +22,10 @@ type SaleBill = {
   createdAt?: Date;
 };
 
+function rnd6(n: number) {
+  return Math.round((n || 0) * 1000000) / 1000000;
+}
+
 export async function GET(req: NextRequest, { params }: RouteParams) {
   try {
     const session = await getServerSession(authOptions);
@@ -56,17 +60,20 @@ export async function GET(req: NextRequest, { params }: RouteParams) {
       sellUnit: s.sellUnit,
       pattaPerBox: s.pattaPerBox || 10,
       mlPerBottle: s.mlPerBottle || 120,
-      total: Math.round(s.total || 0),
+      total: rnd6(s.total || 0),
       createdAt: s.createdAt?.toISOString(),
     }));
 
     return NextResponse.json({
       customer: {
         ...customer,
-        totalUdhar: Math.round(customer.totalUdhar || 0),
-        totalBusiness: Math.round(customer.totalBusiness || 0),
-        paidAmount: Math.round(customer.paidAmount || 0),
-        wusoolHistory: customer.wusoolHistory || [],
+        totalUdhar: rnd6(customer.totalUdhar || 0),
+        totalBusiness: rnd6(customer.totalBusiness || 0),
+        paidAmount: rnd6(customer.paidAmount || 0),
+        wusoolHistory: (customer.wusoolHistory || []).map((w: { amount: number; date: Date; note?: string }) => ({
+          ...w,
+          amount: rnd6(w.amount),
+        })),
       },
       bills,
     });

@@ -18,6 +18,10 @@ type CustomerBody = {
   customerType?: string;
 };
 
+function rnd6(n: number) {
+  return Math.round((n || 0) * 1000000) / 1000000;
+}
+
 export async function GET(req: NextRequest) {
   try {
     const session = await getServerSession(authOptions);
@@ -38,11 +42,14 @@ export async function GET(req: NextRequest) {
 
     const rounded = customers.map((c) => ({
      ...c,
-      totalUdhar: Math.round(c.totalUdhar || 0),
-      totalBusiness: Math.round(c.totalBusiness || 0),
-      paidAmount: Math.round(c.paidAmount || 0),
+      totalUdhar: rnd6(c.totalUdhar),
+      totalBusiness: rnd6(c.totalBusiness),
+      paidAmount: rnd6(c.paidAmount),
       billsCount: c.billsCount || c.saleIds?.length || 1,
-      wusoolHistory: c.wusoolHistory || [],
+      wusoolHistory: (c.wusoolHistory || []).map((w: { amount: number; date: Date; note?: string }) => ({ 
+        ...w, 
+        amount: rnd6(w.amount) 
+      })),
     }));
 
     return NextResponse.json({ customers: rounded });
@@ -66,8 +73,8 @@ export async function POST(req: NextRequest) {
     const userId = new Types.ObjectId(session.user.id);
     const trimmedName = body.name.trim();
     const normalized = trimmedName.toLowerCase();
-    const total = Math.round(body.totalUdhar || 0);
-    const totalBiz = Math.round(body.totalBusiness || body.totalUdhar || 0);
+    const total = rnd6(body.totalUdhar || 0);
+    const totalBiz = rnd6(body.totalBusiness || body.totalUdhar || 0);
 
     const saleObjectId =
       body.saleId && Types.ObjectId.isValid(body.saleId)
@@ -81,9 +88,9 @@ export async function POST(req: NextRequest) {
     });
 
     if (existing) {
-      existing.totalUdhar = Math.round((existing.totalUdhar || 0) + total);
-      existing.totalBusiness = Math.round((existing.totalBusiness || 0) + totalBiz);
-      existing.billsCount = (existing.billsCount || existing.saleIds?.length || 0) + (saleObjectId? 1 : 0);
+      existing.totalUdhar = rnd6(existing.totalUdhar + total);
+      existing.totalBusiness = rnd6(existing.totalBusiness + totalBiz);
+      existing.billsCount = (existing.billsCount || existing.saleIds?.length || 0) + (saleObjectId ? 1 : 0);
       existing.lastUdharDate = new Date();
       if (body.phone?.trim()) existing.phone = body.phone.trim();
       if (body.village?.trim()) existing.village = body.village.trim();
@@ -110,14 +117,14 @@ export async function POST(req: NextRequest) {
         village: body.village?.trim() || "",
         totalUdhar: total,
         totalBusiness: totalBiz,
-        saleIds: saleObjectId? [saleObjectId] : [],
-        billsCount: saleObjectId? 1 : 1,
+        saleIds: saleObjectId ? [saleObjectId] : [],
+        billsCount: saleObjectId ? 1 : 1,
         lastUdharDate: new Date(),
         userId,
         isPaid: false,
         paidAmount: 0,
         wusoolHistory: [],
-        age: body.age && body.age > 0? body.age : undefined,
+        age: body.age && body.age > 0 ? body.age : undefined,
         customerType: body.customerType || "regular",
       });
       return NextResponse.json(cust, { status: 201 });
@@ -125,8 +132,8 @@ export async function POST(req: NextRequest) {
       if (err instanceof Error && err.message.includes("E11000")) {
         const retry = await Customer.findOne({ userId, normalizedName: normalized, isPaid: false });
         if (retry) {
-          retry.totalUdhar = Math.round((retry.totalUdhar || 0) + total);
-          retry.totalBusiness = Math.round((retry.totalBusiness || 0) + totalBiz);
+          retry.totalUdhar = rnd6(retry.totalUdhar + total);
+          retry.totalBusiness = rnd6(retry.totalBusiness + totalBiz);
           if (saleObjectId) {
             if (!retry.saleIds) retry.saleIds = [];
             const exists = retry.saleIds.some(

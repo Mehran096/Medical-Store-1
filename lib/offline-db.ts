@@ -308,10 +308,10 @@ export async function upsertOfflineCustomer(sale: OfflineSale, village = "", pho
 export async function addOfflineWusool(customerLocalId: string, amount: number, note = ""): Promise<WusoolHistoryEntry | null> {
   const customer = await offlineDB.customers.get(customerLocalId);
   if (!customer) return null;
-  const paid = Math.round(amount);
-  const newUdhar = Math.round((customer.totalUdhar || 0) - paid);
+  const paid = Math.round(amount * 1000000) / 1000000;
+  const newUdhar = Math.round((customer.totalUdhar - paid) * 1000000) / 1000000;
   const entry: WusoolHistoryEntry = { amount: paid, date: new Date().toISOString(), note };
-  if (newUdhar <= 0) {
+  if (newUdhar <= 0.000001) {
     await offlineDB.customers.update(customerLocalId, {
       totalUdhar: 0,
       isPaid: true,
@@ -323,7 +323,7 @@ export async function addOfflineWusool(customerLocalId: string, amount: number, 
   } else {
     await offlineDB.customers.update(customerLocalId, {
       totalUdhar: newUdhar,
-      paidAmount: (customer.paidAmount || 0) + paid,
+      paidAmount: Math.round(((customer.paidAmount || 0) + paid) * 1000000) / 1000000,
       lastWusoolDate: entry.date,
       wusoolHistory: [...(customer.wusoolHistory || []), entry],
       synced: 0,

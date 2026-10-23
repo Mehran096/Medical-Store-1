@@ -41,13 +41,24 @@ type SaleBody = {
 
 type DateFilter = { $gte: Date; $lte?: Date };
 type SearchRegex = { $regex: string; $options: string };
+type SaleOrCondition = {
+  productName?: SearchRegex;
+  customerName?: SearchRegex;
+  status?: SaleStatus;
+  isCredit?: boolean;
+  paymentType?: string;
+};
 type SaleQuery = {
   userId: Types.ObjectId;
   createdAt?: DateFilter;
-  $or?: Array<{ productName?: SearchRegex; customerName?: SearchRegex; status?: SaleStatus; isCredit?: boolean; paymentType?: string }>;
-  $and?: Array<{ $or: Array<{ productName?: SearchRegex; customerName?: SearchRegex; status?: SaleStatus; isCredit?: boolean; paymentType?: string }> }>;
+  isCredit?: boolean;
+  status?: SaleStatus;
+  $or?: SaleOrCondition[];
+  $and?: Array<{ $or: SaleOrCondition[] }>;
 };
 type CustomerQuery = { userId: Types.ObjectId; isPaid: boolean; name?: SearchRegex };
+
+function rnd6(n: number) { return Math.round((n || 0) * 1000000) / 1000000; }
 
 function getDateRange(filter: string): { start: Date; end: Date } {
   const now = new Date();
@@ -81,7 +92,7 @@ function calcDeduction(mainUnit: MainUnit, sellUnit: SellUnit, qty: number, ppb:
   } else {
     deductionMain = sellUnit === "ml" ? qty / mlB : qty;
   }
-  return Math.round(deductionMain * 1000000) / 1000000;
+  return rnd6(deductionMain);
 }
 
 export async function GET(req: NextRequest) {
@@ -98,28 +109,31 @@ export async function GET(req: NextRequest) {
     const skip = (page - 1) * limit;
     const userObjectId = new Types.ObjectId(session.user.id);
     const { start, end } = getDateRange(filter);
+    
     const saleQuery: SaleQuery = { userId: userObjectId };
-    if (filter !== "all") saleQuery.createdAt = filter === "yesterday" ? { $gte: start, $lte: end } : { $gte: start };
+    const totalMatch: SaleQuery = { userId: userObjectId };
+    
+    if (filter !== "all") {
+      const dateCond = filter === "yesterday" ? { $gte: start, $lte: end } : { $gte: start };
+      saleQuery.createdAt = dateCond;
+      totalMatch.createdAt = dateCond;
+    }
     if (search) {
       const r: SearchRegex = { $regex: search, $options: "i" };
       saleQuery.$or = [{ productName: r }, { customerName: r }];
-    }
-    if (statusParam === "pending") {
-      const pendingOr = [{ status: "pending" as SaleStatus }, { isCredit: true }, { paymentType: "credit" }, { paymentType: "udhar" }];
-      if (saleQuery.$or) {
-        const prevOr = saleQuery.$or;
-        saleQuery.$and = [{ $or: prevOr }, { $or: pendingOr }];
-        delete saleQuery.$or;
-      } else saleQuery.$or = pendingOr;
-    }
-    const totalMatch: SaleQuery = { userId: userObjectId };
-    if (saleQuery.createdAt) totalMatch.createdAt = saleQuery.createdAt;
-    if (search) {
-      const r: SearchRegex = { $regex: search, $options: "i" };
       totalMatch.$or = [{ productName: r }, { customerName: r }];
     }
+    if (statusParam === "pending") {
+      saleQuery.isCredit = true;
+      totalMatch.isCredit = true;
+    } else if (statusParam === "paid") {
+      saleQuery.isCredit = false;
+      totalMatch.isCredit = false;
+    }
+
     const customerQuery: CustomerQuery = { userId: userObjectId, isPaid: false };
     if (search) customerQuery.name = { $regex: search, $options: "i" };
+    
     const [sales, totalCount, totalAgg, pendingAgg] = await Promise.all([
       Sale.find(saleQuery).sort({ createdAt: -1 }).skip(skip).limit(limit).lean(),
       Sale.countDocuments(saleQuery),
@@ -130,9 +144,9 @@ export async function GET(req: NextRequest) {
     const pendingResult = pendingAgg[0] as { total: number } | undefined;
     return NextResponse.json({
       sales,
-      total: Math.floor((totalResult?.total ?? 0) + 0.49),
-      profit: Math.floor((totalResult?.profit ?? 0) + 0.51),
-      pendingTotal: Math.floor((pendingResult?.total ?? 0) + 0.49),
+      total: rnd6(totalResult?.total ?? 0),
+      profit: rnd6(totalResult?.profit ?? 0),
+      pendingTotal: rnd6(pendingResult?.total ?? 0),
       filter,
       count: totalCount,
       pagination: { page, limit, totalCount, totalPages: Math.ceil(totalCount / limit), hasMore: skip + sales.length < totalCount },
@@ -145,11 +159,12 @@ export async function GET(req: NextRequest) {
 
 async function upsertKhataGrouped(userId: Types.ObjectId, name: string, amount: number, saleId: Types.ObjectId, phone = "", village = "") {
   const normalized = name.trim().toLowerCase();
+  const amt = rnd6(amount);
   return Customer.findOneAndUpdate(
     { userId, normalizedName: normalized, isPaid: false },
     {
       $setOnInsert: { name: name.trim(), normalizedName: normalized, userId, phone, village, isPaid: false, paidAmount: 0 },
-      $inc: { totalUdhar: amount, totalBusiness: amount, billsCount: 1 },
+      $inc: { totalUdhar: amt, totalBusiness: amt, billsCount: 1 },
       $set: { lastUdharDate: new Date() },
       $addToSet: { saleIds: saleId },
     },
@@ -197,12 +212,11 @@ export async function POST(req: NextRequest) {
       if (!batch) return NextResponse.json({ error: "Batch not found for sale" }, { status: 404 });
       if (new Date(batch.expiryDate) < today) return NextResponse.json({ error: `Cannot sell expired batch ${batch.batchNo}` }, { status: 400 });
       
-      const need = Number(body.deductionMain);
+      const need = rnd6(Number(body.deductionMain));
       if (batch.quantity + 0.001 < need) {
         return NextResponse.json({ error: `Batch ${batch.batchNo} only ${batch.quantity.toFixed(6)} box left, need ${need.toFixed(6)}` }, { status: 400 });
       }
 
-      // V45 FIX: calculate exact total/profit in backend, ignore rounded frontend body.total/body.profit
       const buyMain = body.buyPriceMain ?? batch.buyPrice ?? product.buyPriceAvg ?? 0;
       const buyPerPatta = mainUnit === "box" ? buyMain / ppb : buyMain;
       let exactProfit = 0;
@@ -213,7 +227,11 @@ export async function POST(req: NextRequest) {
       } else {
         exactProfit = (sellPrice - buyMain) * quantity;
       }
-      const exactTotal = sellPrice * quantity;
+      const exactTotal = rnd6(sellPrice * quantity);
+      exactProfit = rnd6(exactProfit);
+
+      const isCredit = body.paymentType === "credit" || body.paymentType === "udhar";
+      const customerName = body.customerName?.trim() || "Walk-in";
 
       const sale = await Sale.create({
         productId: productObjectId, productName: product.name, batchId: batch._id,
@@ -223,12 +241,12 @@ export async function POST(req: NextRequest) {
         sellPrice, 
         total: exactTotal,
         profit: exactProfit,
-        deductionMain: need, deductionPatta: body.deductionPatta ?? Math.round(need * ppb * 1000000)/1000000,
+        deductionMain: need, deductionPatta: body.deductionPatta ?? rnd6(need * ppb),
         userId: userObjectId, localId: body.localId || `online_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`,
-        customerName: body.customerName?.trim() || "Walk-in",
-        paymentType: body.paymentType === "credit" || body.paymentType === "udhar" ? "credit" : body.paymentType ?? "cash",
-        status: body.paymentType === "credit" || body.paymentType === "udhar" ? ("pending" as SaleStatus) : ("paid" as SaleStatus),
-        isCredit: body.paymentType === "credit" || body.paymentType === "udhar",
+        customerName,
+        paymentType: isCredit ? "credit" : body.paymentType ?? "cash",
+        status: isCredit ? ("pending" as SaleStatus) : ("paid" as SaleStatus),
+        isCredit,
       });
       
       await Batch.updateOne({ _id: batch._id, userId: userObjectId }, { $inc: { quantity: -need } });
@@ -237,7 +255,15 @@ export async function POST(req: NextRequest) {
       const remaining = await Batch.find({ productId: productObjectId, userId: userObjectId, quantity: { $gt: 0.0001 } });
       const sum = remaining.reduce((s, b) => s + b.quantity, 0);
       const first = remaining.sort((a, b) => new Date(a.expiryDate).getTime() - new Date(b.expiryDate).getTime())[0];
-      await Product.updateOne({ _id: productObjectId, userId: userObjectId }, { $set: { stock: Math.max(0, Math.round(sum * 1000000) / 1000000), nearestExpiry: first?.expiryDate, expiryDate: first?.expiryDate, batchNo: first?.batchNo } });
+      await Product.updateOne({ _id: productObjectId, userId: userObjectId }, { $set: { stock: Math.max(0, rnd6(sum)), nearestExpiry: first?.expiryDate, expiryDate: first?.expiryDate, batchNo: first?.batchNo } });
+
+      if (isCredit && customerName.toLowerCase() !== "walk-in") {
+        try {
+          const customerDoc = await upsertKhataGrouped(userObjectId, customerName, exactTotal, sale._id as Types.ObjectId, body.customerPhone || "", body.customerVillage || "");
+          if (customerDoc?._id) await Sale.updateOne({ _id: sale._id }, { $set: { customerId: customerDoc._id } });
+        } catch (err) { console.error("Khata error batch path:", err); }
+      }
+
       return NextResponse.json(sale, { status: 201 });
     }
 
@@ -258,8 +284,8 @@ export async function POST(req: NextRequest) {
       else if (sellUnit === "half_patta") needPattaRaw = quantity * 0.5;
       else needPattaRaw = quantity * ppb;
     }
-    const saleablePatta = Math.round(saleablePattaRaw * 1000000) / 1000000;
-    const needPatta = Math.round(needPattaRaw * 1000000) / 1000000;
+    const saleablePatta = rnd6(saleablePattaRaw);
+    const needPatta = rnd6(needPattaRaw);
     const EPS = sellUnit === "half_patta" ? 0.03 : 0.001;
     if (saleablePatta + EPS < needPatta) {
       return NextResponse.json({ error: `Only ${saleablePatta.toFixed(3)} patta (${saleableQty.toFixed(3)} ${mainUnit}) left, need ${needPatta.toFixed(1)} patta` }, { status: 400 });
@@ -287,16 +313,17 @@ export async function POST(req: NextRequest) {
         totalProfit += (sellPrice - batch.buyPrice) * qtyForBatch;
       }
       usedBatches.push({ batchId: batch._id as Types.ObjectId, take });
-      remaining = Math.round((remaining - take) * 1000000) / 1000000;
+      remaining = rnd6(remaining - take);
     }
 
     const firstBatch = allBatches[0];
-    const totalSale = sellPrice * quantity;
+    const totalSale = rnd6(sellPrice * quantity);
+    totalProfit = rnd6(totalProfit);
     
     const saleDoc = await Sale.create({
       productId: productObjectId, productName: product.name, batchId: firstBatch._id, batchNo: firstBatch.batchNo, expiryDate: firstBatch.expiryDate,
       mainUnit, sellUnit, quantity, pattaPerBox: ppb, mlPerBottle: mlB, buyPriceMain: firstBatch.buyPrice, sellPrice,
-      total: totalSale, profit: totalProfit, deductionMain: needMain, deductionPatta: Math.round(needMain * ppb * 1000000)/1000000,
+      total: totalSale, profit: totalProfit, deductionMain: needMain, deductionPatta: rnd6(needMain * ppb),
       userId: userObjectId, localId: body.localId || `online_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`,
       customerName, paymentType: isCredit ? "credit" : body.paymentType ?? "cash",
       status: isCredit ? ("pending" as SaleStatus) : ("paid" as SaleStatus), isCredit,
@@ -310,7 +337,7 @@ export async function POST(req: NextRequest) {
     const remainingBatches = await Batch.find({ productId: productObjectId, userId: userObjectId, quantity: { $gt: 0.0001 } });
     const sum = remainingBatches.reduce((s, b) => s + b.quantity, 0);
     const nextEarliest = remainingBatches.sort((a, b) => new Date(a.expiryDate).getTime() - new Date(b.expiryDate).getTime())[0];
-    await Product.updateOne({ _id: productObjectId, userId: userObjectId }, { $set: { stock: Math.max(0, Math.round(sum * 1000000) / 1000000), nearestExpiry: nextEarliest?.expiryDate, expiryDate: nextEarliest?.expiryDate, batchNo: nextEarliest?.batchNo } });
+    await Product.updateOne({ _id: productObjectId, userId: userObjectId }, { $set: { stock: Math.max(0, rnd6(sum)), nearestExpiry: nextEarliest?.expiryDate, expiryDate: nextEarliest?.expiryDate, batchNo: nextEarliest?.batchNo } });
 
     if (isCredit) {
       try {

@@ -43,8 +43,14 @@ const CustomerSchema = new Schema<ICustomer>(
     normalizedName: { type: String, required: true, lowercase: true, trim: true },
     phone: { type: String, default: "", trim: true },
     village: { type: String, default: "", trim: true },
-    totalUdhar: { type: Number, default: 0, min: 0 },
-    totalBusiness: { type: Number, default: 0, min: 0 },
+    totalUdhar: { 
+      type: Number, default: 0, min: 0,
+      set: (v:number)=> Math.round(v*1000000)/1000000
+    },
+    totalBusiness: { 
+      type: Number, default: 0, min: 0,
+      set: (v:number)=> Math.round(v*1000000)/1000000
+    },
     lastUdharDate: { type: Date, default: Date.now },
     saleIds: { type: [{ type: Schema.Types.ObjectId, ref: "Sale" }], default: [] },
     userId: { type: Schema.Types.ObjectId, ref: "User", required: true, index: true },

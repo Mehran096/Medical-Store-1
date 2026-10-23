@@ -36,13 +36,10 @@ type BatchDoc = {
   quantity: number;
 };
 
-function isValidObjectId(id: string): boolean {
-  return Types.ObjectId.isValid(id);
-}
-function normalizeName(name: string | undefined): string {
-  return (name || "Walk-in").trim() || "Walk-in";
-}
-// V32 FIX: 6 decimals
+function rnd6(n: number) { return Math.round((n || 0) * 1000000) / 1000000; }
+function isValidObjectId(id: string): boolean { return Types.ObjectId.isValid(id); }
+function normalizeName(name: string | undefined): string { return (name || "Walk-in").trim() || "Walk-in"; }
+
 function calcDeduction(mainUnit: MainUnit, sellUnit: SellUnit, qty: number, ppb: number, mlB: number): number {
   let d = 0;
   if (mainUnit === "box") {
@@ -52,7 +49,7 @@ function calcDeduction(mainUnit: MainUnit, sellUnit: SellUnit, qty: number, ppb:
   } else {
     d = sellUnit === "ml" ? qty / mlB : qty;
   }
-  return Math.round(d * 1000000) / 1000000;
+  return rnd6(d);
 }
 function getNeedPatta(mainUnit: MainUnit, sellUnit: SellUnit, qty: number, ppb: number): number {
   if (mainUnit !== "box") return qty;
@@ -68,7 +65,7 @@ async function recalcProductStock(productId: Types.ObjectId, userId: Types.Objec
     { _id: productId, userId },
     {
       $set: {
-        stock: Math.round(sum * 1000000) / 1000000, // V32 6 decimals
+        stock: rnd6(sum),
         nearestExpiry: earliest?.expiryDate,
         expiryDate: earliest?.expiryDate,
         batchNo: earliest?.batchNo,
@@ -81,11 +78,12 @@ async function recalcProductStock(productId: Types.ObjectId, userId: Types.Objec
 async function upsertKhataGrouped(userId: Types.ObjectId, name: string, amount: number, saleId: Types.ObjectId) {
   const safeName = normalizeName(name);
   const normalized = safeName.toLowerCase();
+  const amt = rnd6(amount);
   return Customer.findOneAndUpdate(
     { userId, normalizedName: normalized, isPaid: false },
     {
       $setOnInsert: { name: safeName, normalizedName: normalized, userId, isPaid: false, paidAmount: 0 },
-      $inc: { totalUdhar: Math.round(amount), totalBusiness: Math.round(amount), billsCount: 1 },
+      $inc: { totalUdhar: amt, totalBusiness: amt, billsCount: 1 },
       $set: { lastUdharDate: new Date() },
       $addToSet: { saleIds: saleId },
     },
@@ -124,8 +122,8 @@ export async function PUT(req: NextRequest, { params }: Params) {
     const newSellUnit = (body.sellUnit ?? existingSale.sellUnit) as SellUnit;
     const newMainUnit = (body.mainUnit ?? existingSale.mainUnit) as MainUnit;
     const newSellPrice = body.sellPrice ?? existingSale.sellPrice;
-    const oldTotal = Math.round(existingSale.total);
-    const oldDeduct = Number(existingSale.deductionMain ?? 0);
+    const oldTotal = rnd6(existingSale.total);
+    const oldDeduct = rnd6(Number(existingSale.deductionMain ?? 0));
     const oldBatchId = existingSale.batchId as Types.ObjectId | undefined;
 
     if (newQuantity < 0.001) return NextResponse.json({ error: "Valid quantity required" }, { status: 400 });
@@ -139,10 +137,9 @@ export async function PUT(req: NextRequest, { params }: Params) {
     }
 
     const allBatchesForCheck = (await Batch.find({ productId: existingSale.productId, userId: userObjectId, quantity: { $gt: 0.0001 } }).sort({ expiryDate: 1 })) as BatchDoc[];
-    const totalAvailable = allBatchesForCheck.reduce((s, b) => s + b.quantity, 0);
+    const totalAvailable = rnd6(allBatchesForCheck.reduce((s, b) => s + b.quantity, 0));
 
-    // V32 FIX: availPatta = totalAvailable * ppb, not getNeedPatta(box,1)
-    const availPatta = newMainUnit === "box" ? totalAvailable * ppb : totalAvailable;
+    const availPatta = newMainUnit === "box" ? rnd6(totalAvailable * ppb) : totalAvailable;
     const needPatta = getNeedPatta(newMainUnit, newSellUnit, newQuantity, ppb);
     if (availPatta + 0.001 < needPatta) {
       if (oldBatchId && isValidObjectId(String(oldBatchId))) {
@@ -158,7 +155,7 @@ export async function PUT(req: NextRequest, { params }: Params) {
       const take = Math.min(batch.quantity, remaining);
       await Batch.updateOne({ _id: batch._id, userId: userObjectId }, { $inc: { quantity: -take } });
       if (!firstBatchUsed) firstBatchUsed = batch;
-      remaining = Math.round((remaining - take) * 1000000) / 1000000;
+      remaining = rnd6(remaining - take);
     }
 
     await recalcProductStock(existingSale.productId as Types.ObjectId, userObjectId);
@@ -168,7 +165,7 @@ export async function PUT(req: NextRequest, { params }: Params) {
     existingSale.mainUnit = newMainUnit;
     existingSale.sellPrice = Number(newSellPrice);
     existingSale.deductionMain = newDeduct;
-    existingSale.deductionPatta = newMainUnit === "box" ? Math.round(newDeduct * ppb * 1000000)/1000000 : 0;
+    existingSale.deductionPatta = newMainUnit === "box" ? rnd6(newDeduct * ppb) : 0;
 
     if (firstBatchUsed) {
       existingSale.batchId = firstBatchUsed._id;
@@ -208,15 +205,15 @@ export async function PUT(req: NextRequest, { params }: Params) {
       total = Number(newSellPrice) * newQuantity;
       profit = (Number(newSellPrice) - buyPrice) * newQuantity;
     }
-    existingSale.total = Math.round(total);
-    existingSale.profit = Math.round(profit);
+    existingSale.total = rnd6(total);
+    existingSale.profit = rnd6(profit);
     await existingSale.save();
 
     try {
       const newCustomerName = normalizeName(existingSale.customerName as string);
       const newNormalized = newCustomerName.toLowerCase();
-      const newTotal = Math.round(existingSale.total);
-      const amountDiff = newTotal - oldTotal;
+      const newTotal = rnd6(existingSale.total);
+      const amountDiff = rnd6(newTotal - oldTotal);
       const oldCustomerName = normalizeName(existingSale.customerName as string);
       const oldNormalized = oldCustomerName.toLowerCase();
       const wasCredit = oldTotal !== 0 && (await Customer.exists({ userId: userObjectId, saleIds: existingSale._id, isPaid: false })) !== null;
@@ -265,7 +262,7 @@ export async function DELETE(_req: NextRequest, { params }: Params) {
     if (isValidObjectId(id)) saleDoc = await Sale.findOne({ _id: id, userId: userObjectId });
     if (!saleDoc) saleDoc = await Sale.findOne({ localId: id, userId: userObjectId });
     if (!saleDoc) return NextResponse.json({ error: "Sale not found" }, { status: 404 });
-    const restoreQty = Number(saleDoc.deductionMain ?? saleDoc.quantity ?? 0);
+    const restoreQty = rnd6(Number(saleDoc.deductionMain ?? saleDoc.quantity ?? 0));
     const productId = saleDoc.productId as Types.ObjectId;
     if (saleDoc.batchId && isValidObjectId(String(saleDoc.batchId))) {
       await Batch.updateOne({ _id: saleDoc.batchId, userId: userObjectId }, { $inc: { quantity: restoreQty } });
@@ -278,13 +275,13 @@ export async function DELETE(_req: NextRequest, { params }: Params) {
     await recalcProductStock(productId, userObjectId);
     if (saleDoc.isCredit || saleDoc.status === "pending" || saleDoc.paymentType === "credit") {
       try {
-        const saleAmount = Math.round(saleDoc.total);
+        const saleAmount = rnd6(saleDoc.total);
         const updated = await Customer.findOneAndUpdate(
           { userId: userObjectId, saleIds: saleDoc._id, isPaid: false },
           { $inc: { totalUdhar: -saleAmount, totalBusiness: -saleAmount, billsCount: -1 }, $pull: { saleIds: saleDoc._id } },
           { new: true }
         );
-        if (updated && ((updated.totalUdhar ?? 0) <= 0.5 || (updated.billsCount ?? 0) <= 0)) {
+        if (updated && ((updated.totalUdhar ?? 0) <= 0.000001 || (updated.billsCount ?? 0) <= 0)) {
           await Customer.deleteOne({ _id: updated._id });
         }
       } catch (e) {
