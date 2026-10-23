@@ -63,7 +63,6 @@ export default function PurchasesPage() {
 
     const itemsForApi = clean.map(c=>{ if(c.mainUnit === "box") return { ...c, sellPricePerUnit: c.sellPricePerUnit / (c.pattaPerBox || 10) }; return c; });
 
-    // FIXED: key includes expiry day
     const aggForApi = new Map<string, typeof itemsForApi[0]>();
     for(const it of itemsForApi){
       const expiryDay = it.expiryDate ? new Date(it.expiryDate).toISOString().slice(0,10) : "no";
@@ -101,7 +100,6 @@ export default function PurchasesPage() {
         alert(`Saved Offline Rs.${totalAmount}`); setBill([]); setInvoiceNo(""); return;
       }
 
-      // ONLINE: no offline product stub, no syncAllOffline
       const controller = new AbortController(); const to = setTimeout(()=>controller.abort(), 10000);
       const res = await fetch("/api/purchases", {
         method: "POST", headers: {"Content-Type":"application/json"},
@@ -110,6 +108,13 @@ export default function PurchasesPage() {
       });
       clearTimeout(to);
       if(!res.ok) throw new Error(await res.text());
+
+      // FIXED: instant show on sales page + clear stale offline cache
+      localStorage.setItem("stock-updated", Date.now().toString());
+      window.dispatchEvent(new Event("stock-updated"));
+      await offlineDB.products.clear();
+      await offlineDB.batches.clear();
+
       alert(`Saved Rs.${totalAmount}`); setBill([]); setInvoiceNo("");
     } catch(e){
       try {
@@ -121,23 +126,23 @@ export default function PurchasesPage() {
 
   return (
     <div className="min-h-screen bg-gray-50 md:bg-gray-100">
-      <div className="w-full max-w-5xl mx-auto p-2 md:p-6 pb-28">
-        <h1 className="text-[12px] md:text-xl font-bold mb-2 md:mb-4">📦 New Purchase — V18.8 FIX 5→10 {typeof window!=='undefined' &&!navigator.onLine && <span className="ml-2 text-[9px] bg-red-100 text-red-600 px-2 py-0.5 rounded-full">OFFLINE</span>}</h1>
+      <div className="w-full max-w-5xl mx-auto p-2 md:p-6 pb-32">
+        <h1 className="text-[13px] md:text-xl font-bold mb-2 md:mb-4">📦 New Purchase — V19 FIX {typeof window!=='undefined' &&!navigator.onLine && <span className="ml-2 text-[9px] bg-red-100 text-red-600 px-2 py-0.5 rounded-full">OFFLINE</span>}</h1>
         <div className="bg-white border rounded-xl p-2 md:p-4 mb-2 flex gap-2">
           <input value={supplier} onChange={e=>setSupplier(e.target.value)} placeholder="Supplier" className="flex-1 border rounded-lg px-2 md:px-4 py-1 text-[11px] md:text-[15px] h-8 md:h-11" />
           <input value={invoiceNo} onChange={e=>setInvoiceNo(e.target.value)} placeholder="#Inv No" className="w-24 md:w-36 border rounded-lg px-2 md:px-4 py-1 text-[11px] md:text-[15px] h-8 md:h-11" />
         </div>
         <div className="relative bg-white border rounded-xl p-2 md:p-4 mb-2">
-          <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="🔍 Search medicine e.g. panadol" className="w-full border rounded-lg px-2 md:px-4 py-1 text-[11px] md:text-[15px] h-8 md:h-12" />
+          <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="🔍 Search medicine e.g. panadol" className="w-full border rounded-lg px-2 md:px-4 py-1 text-[11px] md:text-[15px] h-8 md:h-12 focus:ring-2 focus:ring-green-500 outline-none" />
           {loading && <p className="text-[10px] md:text-sm text-gray-400 mt-2">Searching...</p>}
           {products.length>0 && (
-            <div className="absolute left-2 right-2 md:left-4 md:right-4 top-11 md:top-15 bg-white border shadow-xl rounded-xl z-20 max-h-72 overflow-auto">
+            <div className="absolute left-2 right-2 md:left-4 md:right-4 top-[44px] md:top-[64px] bg-white border shadow-2xl rounded-xl z-[60] max-h-72 overflow-auto">
               {products.map(p=>{
                 const displaySell = p.mainUnit === "box" ? p.sellPrice * (p.pattaPerBox||10) : p.sellPrice;
                 return (
                   <button key={p._id} onClick={()=>addToBill(p)} className="w-full text-left p-2 md:p-3 border-b hover:bg-green-50 flex justify-between items-center">
-                    <span className="text-[11px] md:text-[14px] font-bold">{p.name} <span className="font-normal text-gray-400 text-[9px] md:text-xs ml-1">{p.company}</span></span>
-                    <span className="text-[8px] md:text-xs bg-gray-100 px-2 py-1 rounded-full">Stk {p.stock} {p.mainUnit} • Buy Rs.{p.buyPriceAvg || p.buyPrice} • Sell Rs.{displaySell}</span>
+                    <span className="text-[11px] md:text-[14px] font-bold truncate">{p.name} <span className="font-normal text-gray-400 text-[9px] md:text-xs ml-1">{p.company}</span></span>
+                    <span className="text-[8px] md:text-xs bg-gray-100 px-2 py-1 rounded-full shrink-0 ml-2">Stk {p.stock} {p.mainUnit} • Buy Rs.{p.buyPriceAvg || p.buyPrice} • Sell Rs.{displaySell}</span>
                   </button>
                 );
               })}
@@ -165,9 +170,10 @@ export default function PurchasesPage() {
             ))
           }
         </div>
-        <div className="bg-green-600 text-white rounded-xl p-3 md:p-4 flex justify-between items-center fixed md:sticky bottom-2 md:bottom-0 left-2 right-2 md:mt-4 shadow-xl z-30 max-w-5xl mx-auto">
+        {/* FIXED: z-20 not z-30, so dropdown z-[60] stays on top, lg:left for sidebar */}
+        <div className="bg-green-600 text-white rounded-xl md:mt-4 p-3 md:p-4 flex justify-between items-center fixed md:sticky bottom-2 md:bottom-0 left-2 right-2 md:left-auto md:right-auto md:mx-auto shadow-xl z-20 max-w-5xl border border-green-700">
           <div><p className="text-[10px] opacity-80">{bill.length} items • Total Kharidari</p><p className="text-[15px] font-bold">Rs.{totalBuy}</p></div>
-          <button onClick={saveBill} disabled={saving||!bill.length} className="bg-white text-green-700 px-5 md:px-8 py-2 rounded-full text-[11px] font-bold disabled:opacity-50">{saving?"Saving...":"Save Bill"}</button>
+          <button onClick={saveBill} disabled={saving||!bill.length} className="bg-white text-green-700 px-5 md:px-8 py-2 rounded-full text-[11px] font-bold disabled:opacity-50 active:scale-95">{saving?"Saving...":"Save Bill"}</button>
         </div>
       </div>
     </div>
