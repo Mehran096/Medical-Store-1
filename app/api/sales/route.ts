@@ -72,7 +72,6 @@ function getDateRange(filter: string): { start: Date; end: Date } {
   return { start, end };
 }
 
-// V32 FIX: 6 decimals not 3
 function calcDeduction(mainUnit: MainUnit, sellUnit: SellUnit, qty: number, ppb: number, mlB: number): number {
   let deductionMain = 0;
   if (mainUnit === "box") {
@@ -131,9 +130,9 @@ export async function GET(req: NextRequest) {
     const pendingResult = pendingAgg[0] as { total: number } | undefined;
     return NextResponse.json({
       sales,
-      total: totalResult?.total ?? 0,
-      profit: totalResult?.profit ?? 0,
-      pendingTotal: Math.round(pendingResult?.total ?? 0),
+      total: Math.floor((totalResult?.total ?? 0) + 0.49),
+      profit: Math.floor((totalResult?.profit ?? 0) + 0.51),
+      pendingTotal: Math.floor((pendingResult?.total ?? 0) + 0.49),
       filter,
       count: totalCount,
       pagination: { page, limit, totalCount, totalPages: Math.ceil(totalCount / limit), hasMore: skip + sales.length < totalCount },
@@ -150,7 +149,7 @@ async function upsertKhataGrouped(userId: Types.ObjectId, name: string, amount: 
     { userId, normalizedName: normalized, isPaid: false },
     {
       $setOnInsert: { name: name.trim(), normalizedName: normalized, userId, phone, village, isPaid: false, paidAmount: 0 },
-      $inc: { totalUdhar: Math.round(amount), totalBusiness: Math.round(amount), billsCount: 1 },
+      $inc: { totalUdhar: amount, totalBusiness: amount, billsCount: 1 },
       $set: { lastUdharDate: new Date() },
       $addToSet: { saleIds: saleId },
     },
@@ -203,12 +202,27 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({ error: `Batch ${batch.batchNo} only ${batch.quantity.toFixed(6)} box left, need ${need.toFixed(6)}` }, { status: 400 });
       }
 
+      // V45 FIX: calculate exact total/profit in backend, ignore rounded frontend body.total/body.profit
+      const buyMain = body.buyPriceMain ?? batch.buyPrice ?? product.buyPriceAvg ?? 0;
+      const buyPerPatta = mainUnit === "box" ? buyMain / ppb : buyMain;
+      let exactProfit = 0;
+      if (mainUnit === "box") {
+        if (sellUnit === "patta") exactProfit = (sellPrice - buyPerPatta) * quantity;
+        else if (sellUnit === "half_patta") exactProfit = (sellPrice - buyPerPatta/2) * quantity;
+        else exactProfit = (sellPrice - buyMain) * quantity;
+      } else {
+        exactProfit = (sellPrice - buyMain) * quantity;
+      }
+      const exactTotal = sellPrice * quantity;
+
       const sale = await Sale.create({
         productId: productObjectId, productName: product.name, batchId: batch._id,
         batchNo: body.batchNo ?? batch.batchNo, expiryDate: body.expiryDate ? new Date(body.expiryDate) : batch.expiryDate,
         mainUnit, sellUnit, quantity, pattaPerBox: ppb, mlPerBottle: mlB,
-        buyPriceMain: body.buyPriceMain ?? batch.buyPrice ?? product.buyPriceAvg,
-        sellPrice, total: body.total ?? Math.round(sellPrice * quantity), profit: body.profit ?? 0,
+        buyPriceMain: buyMain,
+        sellPrice, 
+        total: exactTotal,
+        profit: exactProfit,
         deductionMain: need, deductionPatta: body.deductionPatta ?? Math.round(need * ppb * 1000000)/1000000,
         userId: userObjectId, localId: body.localId || `online_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`,
         customerName: body.customerName?.trim() || "Walk-in",
@@ -277,12 +291,12 @@ export async function POST(req: NextRequest) {
     }
 
     const firstBatch = allBatches[0];
-    const totalSale = Math.round(sellPrice * quantity);
-
+    const totalSale = sellPrice * quantity;
+    
     const saleDoc = await Sale.create({
       productId: productObjectId, productName: product.name, batchId: firstBatch._id, batchNo: firstBatch.batchNo, expiryDate: firstBatch.expiryDate,
       mainUnit, sellUnit, quantity, pattaPerBox: ppb, mlPerBottle: mlB, buyPriceMain: firstBatch.buyPrice, sellPrice,
-      total: totalSale, profit: Math.round(totalProfit), deductionMain: needMain, deductionPatta: Math.round(needMain * ppb * 1000000)/1000000,
+      total: totalSale, profit: totalProfit, deductionMain: needMain, deductionPatta: Math.round(needMain * ppb * 1000000)/1000000,
       userId: userObjectId, localId: body.localId || `online_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`,
       customerName, paymentType: isCredit ? "credit" : body.paymentType ?? "cash",
       status: isCredit ? ("pending" as SaleStatus) : ("paid" as SaleStatus), isCredit,

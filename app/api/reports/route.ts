@@ -34,13 +34,16 @@ function emptyPurchase(): PurchaseAgg {
 function fmtSale(arr: SaleAgg[]) {
   if (!arr?.[0]) return emptySale();
   const r = arr[0];
+  const total = Math.floor((r.total || 0) + 0.49); // 1000.5→1000, 999.9→1000
+  const profit = Math.floor((r.profit || 0) + 0.51); // 500.9→500, 499.9→500
+  const buy = Math.max(0, total - profit); // 1000-500=500
   return {
     count: r.count || 0,
-    total: r.total || 0,
-    profit: r.profit || 0,
-    buy: Math.round(((r.total || 0) - (r.profit || 0)) * 100) / 100,
-    cash: r.cash || 0,
-    credit: r.credit || 0,
+    total,
+    profit,
+    buy,
+    cash: Math.floor((r.cash || 0) + 0.49),
+    credit: Math.floor((r.credit || 0) + 0.49),
   };
 }
 
