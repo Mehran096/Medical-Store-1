@@ -592,7 +592,12 @@ export default function SalesPage() {
               return(
                 <div key={p._id} className={`bg-white rounded-xl p-2.5 shadow-sm hover:shadow-md transition ${borderClass}`}>
                   <div className="flex justify-between gap-1"><p className="font-bold text-[11px] leading-tight truncate w-[60%]">{p.name} <span className="font-normal text-[8px] text-gray-400">{p.company}</span>{expStatus==="expired"&&saleable<=0&&<span className="ml-1 text-[8px] bg-red-600 text-white px-1.5 py-0.5 rounded animate-pulse">EXPIRED</span>}{expStatus==="soon"&&<span className="ml-1 text-[8px] bg-amber-500 text-white px-1.5 py-0.5 rounded">SOON</span>}</p><span className={`text-[8px] px-1.5 py-0.5 rounded-full h-fit whitespace-nowrap ${saleable<=0?"bg-red-600 text-white":"bg-gray-100"}`}>Saleable {p.mainUnit==="box"?`${fmt(saleablePatta,3)} patta`:fmt(saleable,3)} / {fmt(p.stock,3)} {p.mainUnit}</span></div>
-                  <p className="text-[9px] text-gray-500 mt-0.5">TotBuy Rs.{fmt(totalBuyStock,0)} • Buy Rs.{fmt(buyPrice,1)} • Sell Rs.{fmt(p.sellPrice,1)} {p.rack?`• ${p.rack}`:""} {expiryStr?`• ${expiryStr.slice(0,10)}`:""} {batchNoStr?`• Batch ${batchNoStr}`:""} ppb:{ppbSafe}</p>
+                  <p className="text-[9px] text-gray-500 mt-0.5">
+                    {(() => {
+                      const sellPerBox = p.mainUnit === "box" ? p.sellPrice * ppbSafe : p.sellPrice;
+                      return `TotBuy Rs.${fmt(totalBuyStock,0)} • Buy Rs.${fmt(buyPrice,1)} • Sell Rs.${fmt(sellPerBox,1)} ${p.rack?`• ${p.rack}`:""} ${expiryStr?`• ${expiryStr.slice(0,10)}`:""} ${batchNoStr?`• Batch ${batchNoStr}`:""} ppb:${ppbSafe}`;
+                    })()}
+                  </p>
                   <div className="flex bg-gray-100 rounded-full p-0.5 mt-2 w-fit gap-0.5">
                     {sellOptions(p.mainUnit).map(u=>(
                       <button key={u} onClick={()=>{ const def=getDefaultPrice(p,u as SellUnit); setSellUnitMap({...sellUnitMap,[p._id]:u as SellUnit}); setPriceMap({...priceMap,[p._id]:fmt(def,2)});}} className={`px-2.5 py-1 rounded-full text-[9px] ${calc.sellUnit===u?"bg-green-600 text-white font-bold shadow":"text-gray-600"}`}>{u}</button>

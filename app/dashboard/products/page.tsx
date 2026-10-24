@@ -38,6 +38,9 @@ export default function ProductsPage() {
   const [loading, setLoading] = useState(true); const [loadingMore, setLoadingMore] = useState(false);
   const [pendingCount, setPendingCount] = useState(0); const [syncing, setSyncing] = useState(false);
   const [dateFocused, setDateFocused] = useState(false);
+  // NEW LOADING STATES
+  const [updating, setUpdating] = useState(false);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
 
   const refreshAfterAction = useCallback(async (currentSearch: string) => {
     setPage(1);
@@ -66,7 +69,6 @@ export default function ProductsPage() {
           mainUnit: p.mainUnit, pattaPerBox: p.pattaPerBox, mlPerBottle: p.mlPerBottle, sellPrice: p.sellPrice, stock: p.stock, buyPriceAvg: p.buyPriceAvg || p.buyPrice, userId, synced: 1, createdAt: new Date().toISOString(),
         }));
         await offlineDB.products.bulkPut(toCacheProd);
-        // FIXED: clear old batches to avoid stale stock
         for (const p of list) { await offlineDB.batches.where('productId').equals(p._id).delete(); }
         const toCacheBatch: OfflineBatch[] = [];
         for (const p of list) {
@@ -157,20 +159,21 @@ export default function ProductsPage() {
     let sellToStore = sellInput; if (form.mainUnit === "box") sellToStore = sellInput / ppb;
     const payload = { name: form.name.trim(), company: form.company || "Unknown", generic: form.generic, batchNo: form.batchNo.trim(), expiryDate: form.expiryDate, rack: form.rack, barcode: form.barcode, mainUnit: form.mainUnit, pattaPerBox: ppb, mlPerBottle: Number(form.mlPerBottle) || 120, buyPrice: buy, buyPriceAvg: buy, sellPrice: sellToStore, stock: stock, quantity: stock };
     const offlineUser = getOfflineUser();
-    if (typeof window !== "undefined" && !window.navigator.onLine) {
-      const localId = editId && editId.startsWith("local_") ? editId : generateLocalId();
-      const batchLocalId = `batch_${Date.now()}_${Math.random().toString(36).slice(2, 5)}`;
-      await offlineDB.transaction('rw', offlineDB.products, offlineDB.batches, offlineDB.syncQueue, async () => {
-        const offlineProd: OfflineProduct = { _id: editId && !editId.startsWith("local_") ? editId : localId, localId, name: payload.name, company: payload.company, generic: payload.generic, barcode: payload.barcode, rack: payload.rack, mainUnit: payload.mainUnit as MainUnit, pattaPerBox: payload.pattaPerBox, mlPerBottle: payload.mlPerBottle, sellPrice: payload.sellPrice, stock: payload.stock, buyPriceAvg: payload.buyPrice, userId: offlineUser?._id || "offline", synced: 0, createdAt: new Date().toISOString() };
-        await offlineDB.products.put(offlineProd);
-        const batch: OfflineBatch = { localId: batchLocalId, productId: localId, batchNo: payload.batchNo, expiryDate: new Date(payload.expiryDate).toISOString(), buyPrice: payload.buyPrice, quantity: payload.stock, userId: offlineUser?._id || "offline", synced: 0, createdAt: new Date().toISOString() };
-        await offlineDB.batches.put(batch);
-        await offlineDB.syncQueue.add({ type: 'product', localId, payload: offlineProd, createdAt: new Date(), attempts: 0 });
-        await offlineDB.syncQueue.add({ type: 'batch', localId: batchLocalId, payload: batch, createdAt: new Date(), attempts: 0 });
-      });
-      setPendingCount((c) => c + 1); setForm({ name: "", company: "", generic: "", batchNo: "", expiryDate: "", rack: "", barcode: "", mainUnit: "box", pattaPerBox: "10", mlPerBottle: "120", buyPrice: "", sellPrice: "", stock: "10" }); setEditId(null); await refreshAfterAction(search); return;
-    }
+    setUpdating(true);
     try {
+      if (typeof window !== "undefined" && !window.navigator.onLine) {
+        const localId = editId && editId.startsWith("local_") ? editId : generateLocalId();
+        const batchLocalId = `batch_${Date.now()}_${Math.random().toString(36).slice(2, 5)}`;
+        await offlineDB.transaction('rw', offlineDB.products, offlineDB.batches, offlineDB.syncQueue, async () => {
+          const offlineProd: OfflineProduct = { _id: editId && !editId.startsWith("local_") ? editId : localId, localId, name: payload.name, company: payload.company, generic: payload.generic, barcode: payload.barcode, rack: payload.rack, mainUnit: payload.mainUnit as MainUnit, pattaPerBox: payload.pattaPerBox, mlPerBottle: payload.mlPerBottle, sellPrice: payload.sellPrice, stock: payload.stock, buyPriceAvg: payload.buyPrice, userId: offlineUser?._id || "offline", synced: 0, createdAt: new Date().toISOString() };
+          await offlineDB.products.put(offlineProd);
+          const batch: OfflineBatch = { localId: batchLocalId, productId: localId, batchNo: payload.batchNo, expiryDate: new Date(payload.expiryDate).toISOString(), buyPrice: payload.buyPrice, quantity: payload.stock, userId: offlineUser?._id || "offline", synced: 0, createdAt: new Date().toISOString() };
+          await offlineDB.batches.put(batch);
+          await offlineDB.syncQueue.add({ type: 'product', localId, payload: offlineProd, createdAt: new Date(), attempts: 0 });
+          await offlineDB.syncQueue.add({ type: 'batch', localId: batchLocalId, payload: batch, createdAt: new Date(), attempts: 0 });
+        });
+        setPendingCount((c) => c + 1); setForm({ name: "", company: "", generic: "", batchNo: "", expiryDate: "", rack: "", barcode: "", mainUnit: "box", pattaPerBox: "10", mlPerBottle: "120", buyPrice: "", sellPrice: "", stock: "10" }); setEditId(null); await refreshAfterAction(search); return;
+      }
       const url = editId && !editId.startsWith("local_") ? `/api/products/${editId}` : "/api/products";
       const method = editId && !editId.startsWith("local_") ? "PUT" : "POST";
       const body = editId && editId.startsWith("local_") ? {...payload, localId: editId } : payload;
@@ -189,6 +192,8 @@ export default function ProductsPage() {
         await offlineDB.syncQueue.add({ type: 'batch', localId: batchLocalId, payload: batch, createdAt: new Date(), attempts: 0 });
       });
       setPendingCount((c) => c + 1);
+    } finally {
+      setUpdating(false);
     }
     setForm({ name: "", company: "", generic: "", batchNo: "", expiryDate: "", rack: "", barcode: "", mainUnit: "box", pattaPerBox: "10", mlPerBottle: "120", buyPrice: "", sellPrice: "", stock: "10" }); setEditId(null); await refreshAfterAction(search);
   };
@@ -201,9 +206,18 @@ export default function ProductsPage() {
 
   const handleDelete = async (id: string) => {
     if (!window.confirm("Delete this medicine?")) return;
-    if (id.startsWith("local_")) { await offlineDB.transaction('rw', offlineDB.products, offlineDB.batches, async () => { await offlineDB.products.delete(id); await offlineDB.batches.where('productId').equals(id).delete(); }); setPendingCount((c) => Math.max(0, c - 1)); await refreshAfterAction(search); return; }
-    try { await fetch(`/api/products/${id}`, { method: "DELETE" }); } catch { await offlineDB.products.delete(id); }
-    await refreshAfterAction(search);
+    setDeletingId(id);
+    try {
+      if (id.startsWith("local_")) { await offlineDB.transaction('rw', offlineDB.products, offlineDB.batches, async () => { await offlineDB.products.delete(id); await offlineDB.batches.where('productId').equals(id).delete(); }); setPendingCount((c) => Math.max(0, c - 1)); await refreshAfterAction(search); return; }
+      await fetch(`/api/products/${id}`, { method: "DELETE" }); 
+      await refreshAfterAction(search);
+    } catch (err) { 
+      console.error(err);
+      await offlineDB.products.delete(id); 
+      await refreshAfterAction(search);
+    } finally {
+      setDeletingId(null);
+    }
   };
 
   const ppbForm = Number(form.pattaPerBox) || 10; const buyForm = Number(form.buyPrice) || 0; const sellInputForm = Number(form.sellPrice) || 0;
@@ -217,15 +231,15 @@ export default function ProductsPage() {
       <div className="flex flex-col gap-3 mb-4"><h1 className="text-[20px] font-bold">💊 Yasir Medical - Stock V17 BATCH</h1><input placeholder="🔍 Search..." value={search} onChange={(e) => handleSearchChange(e.target.value)} className="border p-2.5 rounded-xl w-full sm:w-72 bg-white text-[14px]" /></div>
       <form onSubmit={handleSubmit} className="bg-white p-3 rounded-xl shadow-sm border mb-6">
         <p className="font-semibold mb-3 text-[13px]">{editId? "Edit Medicine (updates batch qty)" : "Add New Batch - V17 FIFO"}</p>
-        <div className="grid grid-cols-2 sm:grid-cols-12 gap-2">
-          <input placeholder="Medicine Name *" value={form.name} onChange={(e) => setForm({...form, name: e.target.value })} className="border p-2.5 rounded-lg col-span-2 sm:col-span-4 text-[13px]" required />
+        <div className="grid grid-cols-2 sm:grid-cols-4 md:grid-cols-6 gap-2">
+          <input placeholder="Medicine Name *" value={form.name} onChange={(e) => setForm({...form, name: e.target.value })} className="border p-2.5 rounded-lg col-span-2 sm:col-span-3 text-[13px]" required />
           <input placeholder="Company" value={form.company} onChange={(e) => setForm({...form, company: e.target.value })} className="border p-2.5 rounded-lg sm:col-span-3 text-[13px]" />
-          <input placeholder="Generic" value={form.generic} onChange={(e) => setForm({...form, generic: e.target.value })} className="border p-2.5 rounded-lg text-[13px]" />
           <input placeholder="Batch No * (required)" value={form.batchNo} onChange={(e) => setForm({...form, batchNo: e.target.value })} className="border-2 border-amber-200 p-2.5 rounded-lg text-[13px]" required />
-          <input placeholder="Barcode" value={form.barcode} onChange={(e) => setForm({...form, barcode: e.target.value })} className="border p-2.5 rounded-lg text-[13px]" />
           <div className="relative w-full">
             <input type={dateFocused || form.expiryDate? "date" : "text"} value={form.expiryDate || ""} placeholder="Expiry Date * required" onFocus={() => setDateFocused(true)} onBlur={() => setDateFocused(false)} onChange={(e) => setForm({...form, expiryDate: e.target.value })} className="w-full border-2 border-amber-200 p-2.5 rounded-xl bg-white text-black text-[13px] min-h-11 block appearance-auto outline-none focus:ring-2 focus:ring-teal-600 placeholder:text-gray-400" style={{ colorScheme: "light" }} required />
           </div>
+          <input placeholder="Generic" value={form.generic} onChange={(e) => setForm({...form, generic: e.target.value })} className="border p-2.5 rounded-lg text-[13px]" />
+          <input placeholder="Barcode" value={form.barcode} onChange={(e) => setForm({...form, barcode: e.target.value })} className="border p-2.5 rounded-lg text-[13px]" />
           <input placeholder="Rack" value={form.rack} onChange={(e) => setForm({...form, rack: e.target.value })} className="border p-2.5 rounded-lg text-[13px]" />
           <select value={form.mainUnit} onChange={(e) => setForm({...form, mainUnit: e.target.value as MainUnit })} className="border p-2.5 rounded-lg bg-white text-[13px] col-span-2">
             <option value="box">Stock Main: Box (10 Patta)</option>
@@ -240,7 +254,12 @@ export default function ProductsPage() {
           <input placeholder={`Stock in ${form.mainUnit}`} type="number" step="0.001" value={form.stock} onChange={(e) => setForm({...form, stock: e.target.value })} className="border p-2.5 rounded-lg text-[13px]" required />
         </div>
         {buyForm>0 && sellInputForm>0 && (<p className={`mt-2 text-[12px] ${profitPerPatta > 0? "text-green-600" : "text-red-600"}`}>{form.mainUnit==="box"? <>Box Buy {buyForm} → Patta {(buyForm/ppbForm).toFixed(1)} | Sell {sellInputForm} → Patta {sellPerPattaDisplay.toFixed(1)} | <b>Profit Patta {profitPerPatta.toFixed(1)} | Box {profitPerBox.toFixed(1)}</b></> : form.mainUnit==="bottle" ? <>Bottle {form.mlPerBottle}ml | Buy {buyForm} Sell {sellInputForm} Profit {profitPerPatta.toFixed(1)}</> : <>Profit per {form.mainUnit}: {profitPerPatta.toFixed(1)}</>}</p>)}
-        <div className="flex gap-2 mt-3"><button type="submit" className="bg-green-600 text-white px-6 py-2 rounded-lg text-[13px]">{editId? "Update Batch Qty" : "+ Add Batch"}</button>{editId && <button type="button" onClick={() => { setEditId(null); setForm({ name: "", company: "", generic: "", batchNo: "", expiryDate: "", rack: "", barcode: "", mainUnit: "box", pattaPerBox: "10", mlPerBottle: "120", buyPrice: "", sellPrice: "", stock: "10" }); }} className="bg-gray-100 px-6 py-2 rounded-lg text-[13px]">Cancel</button>}</div>
+        <div className="flex gap-2 mt-3">
+          <button type="submit" disabled={updating} className="bg-green-600 text-white px-6 py-2 rounded-lg text-[13px] disabled:opacity-50 disabled:cursor-not-allowed">
+            {updating ? "Saving..." : editId ? "Update Batch Qty" : "+ Add Batch"}
+          </button>
+          {editId && <button type="button" disabled={updating} onClick={() => { setEditId(null); setForm({ name: "", company: "", generic: "", batchNo: "", expiryDate: "", rack: "", barcode: "", mainUnit: "box", pattaPerBox: "10", mlPerBottle: "120", buyPrice: "", sellPrice: "", stock: "10" }); }} className="bg-gray-100 px-6 py-2 rounded-lg text-[13px] disabled:opacity-50">Cancel</button>}
+        </div>
       </form>
       {loading? <p className="text-center py-10 text-[13px]">Loading...</p> : (
         <><div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">{products.map((p) => {
@@ -256,7 +275,12 @@ export default function ProductsPage() {
               <div className="bg-blue-50 p-1.5 rounded text-center">{isBox ? <><div className="text-gray-500 text-[9px]">Sell/Patta</div><div className="font-bold text-[11px]">Rs.{fmt1(p.sellPrice)}</div><div className="text-[9px]">Box: Rs.{fmt1(sellPerBoxOrBottle)}</div></> : isBottle ? <><div className="text-gray-500 text-[9px]">Sell/bottle</div><div className="font-bold text-[11px]">Rs.{fmt1(p.sellPrice)}</div><div className="text-[9px]">{ml}ml</div></> : <><div className="text-gray-500 text-[9px]">Sell/{p.mainUnit}</div><div className="font-bold text-[11px]">Rs.{fmt1(p.sellPrice)}</div></>}<div className="mt-1 pt-1 border-t border-blue-200 font-bold text-green-700">Total Sell<br/>Rs.{fmt1(totalSell)}</div></div>
               <div className="bg-green-50 p-1.5 rounded text-center"><div className="text-gray-500 text-[9px]">Stock</div>{isBottle ? <><div className="font-bold text-[11px]">{fmt1(p.stock)} bottle</div><div className="text-[9px]">{fmt1(p.stock * ml)}ml total</div></> : isBox ? <><div className="font-bold text-[11px]">{fmt1(p.stock)} box</div><div className="text-[9px]">{fmt1(p.stock*ppb)} Patta</div></> : <><div className="font-bold text-[11px]">{fmt1(p.stock)} {p.mainUnit}</div></>}<div className="mt-1 pt-1 border-t border-green-200 font-bold text-blue-700">Profit<br/>Rs.{fmt1(totalProfit)}</div></div>
             </div>
-            <div className="flex gap-1.5 mt-2"><button onClick={() => handleEdit(p)} className="flex-1 bg-blue-50 text-blue-600 py-1.5 rounded-lg text-[11px]">Edit</button><button onClick={() => handleDelete(p._id)} className="flex-1 bg-red-50 text-red-600 py-1.5 rounded-lg text-[11px]">Del</button></div>
+            <div className="flex gap-1.5 mt-2">
+              <button onClick={() => handleEdit(p)} disabled={deletingId===p._id || updating} className="flex-1 bg-blue-50 text-blue-600 py-1.5 rounded-lg text-[11px] disabled:opacity-50">Edit</button>
+              <button onClick={() => handleDelete(p._id)} disabled={deletingId===p._id} className="flex-1 bg-red-50 text-red-600 py-1.5 rounded-lg text-[11px] disabled:opacity-50">
+                {deletingId===p._id ? "Deleting..." : "Del"}
+              </button>
+            </div>
           </div>)})}</div>{pagination.hasMore && <button onClick={() => setPage((pr) => pr + 1)} disabled={loadingMore} className="w-full mt-4 py-2.5 bg-white border rounded-xl text-[13px]">{loadingMore? "Loading..." : `More (${pagination.totalCount - products.length})`}</button>}</>
       )}
     </div>
