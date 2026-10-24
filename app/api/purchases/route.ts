@@ -49,7 +49,7 @@ export async function GET(req: NextRequest) {
   const searchParams = req.nextUrl.searchParams;
   const filter = searchParams.get("filter") || "all";
   const page = Math.max(1, parseInt(searchParams.get("page") || "1", 10));
-  const limit = Math.min(50, Math.max(1, parseInt(searchParams.get("limit") || "15", 10)));
+  const limit = Math.min(500, Math.max(1, parseInt(searchParams.get("limit") || "15", 10)));
   const skip = (page - 1) * limit;
   const { startTodayUTC, startTomorrowUTC, startMonthUTC, startYearUTC } = getPKTRange();
   let dateRange: DateRange | undefined;

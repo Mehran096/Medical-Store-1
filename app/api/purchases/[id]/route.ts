@@ -11,7 +11,13 @@ export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
 type RouteParams = { params: Promise<{ id: string }> };
-type PurchaseItemDoc = { productId: Types.ObjectId | string; quantity: number; batchNo: string };
+type PurchaseItemDoc = { productId: Types.ObjectId | string; quantity: number; batchNo: string; expiryDate?: string | Date };
+type BatchQuery = {
+  productId: Types.ObjectId;
+  userId: Types.ObjectId;
+  batchNo: { $regex: string; $options: string };
+  expiryDate?: { $gte: Date; $lt: Date };
+};
 
 function getCleanId(raw: string): string {
   const trimmed = raw.trim();
@@ -65,29 +71,38 @@ export async function DELETE(_req: NextRequest, { params }: RouteParams) {
 
   try {
     const items = deleted.items as PurchaseItemDoc[];
-    const agg = new Map<string, { qty: number; pid: Types.ObjectId; bNo: string }>();
+    const agg = new Map<string, { qty: number; pid: Types.ObjectId; bNo: string; expiry?: Date }>();
 
     for (const it of items) {
       const bNo = String(it.batchNo).trim();
       const pid = toObjectId(it.productId);
       if (!bNo || !pid) continue;
-      const key = `${pid.toString()}_${bNo.toLowerCase()}`;
+      const expiry = it.expiryDate ? new Date(it.expiryDate) : undefined;
+      const expiryDay = expiry ? expiry.toISOString().slice(0,10) : "no-expiry";
+      const key = `${pid.toString()}_${bNo.toLowerCase()}_${expiryDay}`;
       const cur = agg.get(key);
       if (cur) cur.qty += Number(it.quantity);
-      else agg.set(key, { qty: Number(it.quantity), pid, bNo });
+      else agg.set(key, { qty: Number(it.quantity), pid, bNo, expiry });
     }
 
     for (const v of agg.values()) {
       const escaped = v.bNo.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-      const batch = await Batch.findOne({
+      const batchQuery: BatchQuery = {
         productId: v.pid,
         userId,
         batchNo: { $regex: `^${escaped}$`, $options: "i" },
-      });
+      };
+      if (v.expiry) {
+        const day = v.expiry.toISOString().slice(0,10);
+        batchQuery.expiryDate = {
+          $gte: new Date(day),
+          $lt: new Date(new Date(day).getTime() + 24*60*60*1000)
+        };
+      }
+      const batch = await Batch.findOne(batchQuery);
 
       if (batch) {
         const newQty = Math.round(Math.max(0, batch.quantity - v.qty) * 1000000) / 1000000;
-
         if (newQty <= 0.001) await Batch.deleteOne({ _id: batch._id });
         else await Batch.updateOne({ _id: batch._id }, { $set: { quantity: newQty } });
 
