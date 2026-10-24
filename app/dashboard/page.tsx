@@ -96,6 +96,7 @@ function TopSellingCard({ top, filter, setFilter }: { top: TopItem[]; filter: To
 type OfflineTable = { toArray: () => Promise<unknown[]>; bulkPut: (items: unknown[]) => Promise<void>; };
 type BackupDB = { products: OfflineTable; sales: OfflineTable; batches: OfflineTable; purchases: OfflineTable; customers: OfflineTable; syncQueue: OfflineTable; };
 function getDB(): BackupDB { return offlineDB as unknown as BackupDB; }
+type SavePicker = { showSaveFilePicker: (opts: { suggestedName: string; types: {description:string; accept: Record<string,string[]>}[] }) => Promise<{ createWritable: () => Promise<{ write: (b: Blob) => Promise<void>; close: () => Promise<void> }> }> };
 
 export default function MainDashboard() {
   const isOnline = useIsOnline(); const isOffline =!isOnline;
@@ -125,11 +126,8 @@ export default function MainDashboard() {
       let cloudProducts: unknown[] = []; let cloudSales: unknown[] = []; let cloudPurchases: unknown[] = []; let cloudCustomers: unknown[] = [];
       if(isOnlineNow){
         try{
-          // Products
           const pRes = await fetch("/api/products?limit=1000").then(r=>r.json()).catch(()=>[]);
           cloudProducts = Array.isArray(pRes) ? pRes : (pRes as {products?: unknown[]}).products || [];
-
-          // Sales - loop all pages (your API limit 100)
           let allSales: unknown[] = []; let sPage=1;
           while(true){
             const sJson = await fetch(`/api/sales?filter=all&limit=100&page=${sPage}`).then(r=>r.json()).catch(()=>null);
@@ -140,11 +138,9 @@ export default function MainDashboard() {
             sPage++; if(sPage>10) break;
           }
           cloudSales = allSales;
-
-          // Purchases - loop (your API returns {purchases, pagination})
           let allPur: unknown[] = []; let purPage=1;
           while(true){
-            const purJson = await fetch(`/api/purchases?limit=50&page=${purPage}`).then(r=>r.json()).catch(()=>null);
+            const purJson = await fetch(`/api/purchases?limit=500&page=${purPage}`).then(r=>r.json()).catch(()=>null);
             const list = (purJson as {purchases?: unknown[]})?.purchases || [];
             if(list.length===0) break;
             allPur = [...allPur, ...list];
@@ -153,8 +149,6 @@ export default function MainDashboard() {
             purPage++; if(purPage>20) break;
           }
           cloudPurchases = allPur;
-
-          // Customers
           const cJson = await fetch("/api/customers?search=").then(r=>r.json()).catch(()=>({customers:[]}));
           cloudCustomers = (cJson as {customers?: unknown[]}).customers || [];
         }catch{ /* offline only */ }
@@ -164,22 +158,42 @@ export default function MainDashboard() {
       const finalPurchases = cloudPurchases.length > 0 ? cloudPurchases : offlinePurchases;
       const finalCustomers = cloudCustomers.length > 0 ? cloudCustomers : offlineCustomers;
       const backup = {
-        version: "V24", date: new Date().toISOString(), shop: "Yasir Medical Store - Ismaila", isOnline: isOnlineNow,
+        version: "V25-USB", date: new Date().toISOString(), shop: "Yasir Medical Store - Ismaila", isOnline: isOnlineNow,
         totals: { products: finalProducts.length, sales: finalSales.length, purchases: finalPurchases.length, customers: finalCustomers.length, batches: offlineBatches.length, udhar: totalUdhar },
         data: { products: finalProducts, batches: offlineBatches, sales: finalSales, purchases: finalPurchases, customers: finalCustomers, offlinePending: offlineSales }
       };
-      const blob = new Blob([JSON.stringify(backup, null, 2)], {type:"application/json"});
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a"); a.href = url;
+      const jsonStr = JSON.stringify(backup, null, 2);
+      const blob = new Blob([jsonStr], {type:"application/json"});
       const fileName = `Yasir-Medical-FULL-BACKUP-${new Date().toISOString().slice(0,10)}-${finalProducts.length}Meds-${finalSales.length}Sales-${finalPurchases.length}Pur.json`;
-      a.download = fileName;
-      if(!isAuto || !localStorage.getItem(`auto_backup_done_${new Date().toISOString().slice(0,10)}`)){
-        a.click(); if(isAuto) localStorage.setItem(`auto_backup_done_${new Date().toISOString().slice(0,10)}`, "1");
+
+      let savedToUSB = false;
+      if(!isAuto && typeof window !== "undefined" && "showSaveFilePicker" in window){
+        try{
+          const picker = window as unknown as SavePicker;
+          const handle = await picker.showSaveFilePicker({
+            suggestedName: fileName,
+            types: [{ description: "JSON Backup", accept: { "application/json": [".json"] } }]
+          });
+          const writable = await handle.createWritable();
+          await writable.write(blob);
+          await writable.close();
+          savedToUSB = true;
+        }catch(err){
+          if((err as Error).name === "AbortError") { setBackingUp(false); return; }
+        }
+      }
+      if(!savedToUSB){
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a"); a.href = url; a.download = fileName;
+        if(!isAuto || !localStorage.getItem(`auto_backup_done_${new Date().toISOString().slice(0,10)}`)){
+          a.click();
+          if(isAuto) localStorage.setItem(`auto_backup_done_${new Date().toISOString().slice(0,10)}`, "1");
+        }
+        URL.revokeObjectURL(url);
       }
       const nowStr = new Date().toLocaleString("en-PK",{timeZone:"Asia/Karachi"});
       localStorage.setItem("yasir_last_backup", nowStr); setLastBackup(nowStr);
-      if(!isAuto) alert(`✅ Full Backup V24 Saved!\nFile: ${fileName}\nProducts: ${finalProducts.length} | Sales: ${finalSales.length} | Purchases: ${finalPurchases.length} | Customers: ${finalCustomers.length} | Batches: ${offlineBatches.length} | Udhar: Rs.${totalUdhar}`);
-      URL.revokeObjectURL(url);
+      if(!isAuto) alert(`✅ Full Backup V25 Saved!\nFile: ${fileName}\n${savedToUSB? "Location: USB (you selected)" : "Location: Downloads"}\nProducts: ${finalProducts.length} | Sales: ${finalSales.length} | Purchases: ${finalPurchases.length}`);
     }catch(e){ alert("Backup failed: "+(e as Error).message); } finally{ setBackingUp(false); }
   },[backingUp, totalUdhar]);
 
@@ -194,20 +208,91 @@ export default function MainDashboard() {
   },[autoBackupOn, doFullBackup]);
 
   const handleRestore = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0]; if(!file) return;
-    if(!confirm(`Restore backup from ${file.name}? This will OVERWRITE current offline data. Are you sure?`)) return;
-    try{
-      const text = await file.text(); const json = JSON.parse(text) as { data?: { products?: unknown[]; batches?: unknown[]; sales?: unknown[]; purchases?: unknown[]; customers?: unknown[] } };
-      const d = json.data ?? json as unknown as { products?: unknown[]; batches?: unknown[]; sales?: unknown[]; purchases?: unknown[]; customers?: unknown[] };
-      const db = getDB();
-      if(d.products?.length) await db.products.bulkPut(d.products);
-      if(d.batches?.length) await db.batches.bulkPut(d.batches);
-      if(d.sales?.length) await db.sales.bulkPut(d.sales);
-      if(d.purchases?.length) await db.purchases.bulkPut(d.purchases);
-      if(d.customers?.length) await db.customers.bulkPut(d.customers);
-      alert(`✅ Restored: ${d.products?.length??0} products, ${d.sales?.length??0} sales`); location.reload();
-    }catch(err){ alert("Restore failed: "+(err as Error).message); } finally{ if(fileInputRef.current) fileInputRef.current.value=""; }
-  };
+  const file = e.target.files?.[0];
+  if (!file) return;
+  if (!confirm(`Restore backup from ${file.name}? Will restore OFFLINE + CLOUD. Are you sure?`)) return;
+
+  try {
+    const text = await file.text();
+    const json = JSON.parse(text) as { data?: { products?: unknown[]; batches?: unknown[]; sales?: unknown[]; purchases?: unknown[]; customers?: unknown[] } };
+    const d = (json.data ?? json) as {
+      products?: Record<string, unknown>[];
+      batches?: Record<string, unknown>[];
+      sales?: Record<string, unknown>[];
+      purchases?: Record<string, unknown>[];
+      customers?: Record<string, unknown>[];
+    };
+
+    const fix = (list: Record<string, unknown>[] | undefined) => {
+      if (!list) return [];
+      return list.map((item) => {
+        const fallback = `restored_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+        const id = (item._id as string) || (item.localId as string) || fallback;
+        return {
+          ...item,
+          _id: (item._id as string) || id,
+          localId: (item.localId as string) || (item._id as string) || id,
+          synced: 1,
+        };
+      });
+    };
+
+    const db = getDB();
+    const prods = fix(d.products);
+    const bats = fix(d.batches);
+    const sales = fix(d.sales);
+    const purs = fix(d.purchases);
+    const custs = fix(d.customers);
+
+    // OFFLINE - clear + bulkPut
+    try { await offlineDB.products.clear(); } catch {}
+    try { await offlineDB.batches.clear(); } catch {}
+    try { await offlineDB.sales.clear(); } catch {}
+    try { await offlineDB.purchases.clear(); } catch {}
+    try { await offlineDB.customers.clear(); } catch {}
+
+    if (prods.length) await db.products.bulkPut(prods);
+    if (bats.length) await db.batches.bulkPut(bats);
+    if (sales.length) await db.sales.bulkPut(sales);
+    if (purs.length) await db.purchases.bulkPut(purs);
+    if (custs.length) await db.customers.bulkPut(custs);
+
+    // CLOUD RESTORE - one call to /api/restore (no double deduction)
+    if (window.navigator.onLine) {
+      try {
+        const res = await fetch("/api/restore", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            products: d.products,
+            batches: d.batches,
+            sales: d.sales,
+            purchases: d.purchases,
+            customers: d.customers,
+          }),
+        });
+        const result = await res.json();
+        if (result.success) {
+          alert(
+            `✅ Restored OFFLINE + CLOUD!\n\nOffline: ${prods.length} prods, ${sales.length} sales, ${purs.length} purchases\n\nCloud: ${result.restored.products} prods, ${result.restored.sales} sales, ${result.restored.purchases} purchases, ${result.restored.batches} batches\nSkipped: ${JSON.stringify(result.skipped)}`
+          );
+        } else {
+          alert(`✅ Offline Restored, Cloud Failed: ${result.error}\nCheck /api/restore route deployed?`);
+        }
+      } catch (err) {
+        alert(`✅ Offline Restored, Cloud error: ${(err as Error).message}\nYour data is safe offline, will sync when API ready.`);
+      }
+    } else {
+      alert(`✅ Offline Restored!\n${prods.length} products, ${sales.length} sales, ${purs.length} purchases\nConnect internet to restore cloud.`);
+    }
+
+    location.reload();
+  } catch (err) {
+    alert("Restore failed: " + (err as Error).message);
+  } finally {
+    if (fileInputRef.current) fileInputRef.current.value = "";
+  }
+};
 
   useEffect(() => {
     const controller = new AbortController();
@@ -258,8 +343,8 @@ export default function MainDashboard() {
       <div className="mb-4 bg-linear-to-r from-green-600 to-emerald-700 text-white p-4 rounded-xl shadow-lg border border-green-700">
         <div className="flex flex-col sm:flex-row justify-between gap-3">
           <div>
-            <h2 className="font-bold text-[14px] flex items-center gap-2">📦 Daily Full Backup — V24 <span className={`text-[9px] px-2 py-0.5 rounded-full ${autoBackupOn?"bg-white text-green-700":"bg-red-100 text-red-600"}`}>{autoBackupOn?"AUTO 11 PM ON":"AUTO OFF"}</span></h2>
-            <p className="text-[11px] opacity-90 mt-1">Products + Batches + Sales + Purchases + Udhar Khata</p>
+            <h2 className="font-bold text-[14px] flex items-center gap-2">📦 Daily Full Backup — V25 <span className={`text-[9px] px-2 py-0.5 rounded-full ${autoBackupOn?"bg-white text-green-700":"bg-red-100 text-red-600"}`}>{autoBackupOn?"AUTO 11 PM ON":"AUTO OFF"}</span></h2>
+            <p className="text-[11px] opacity-90 mt-1">Products + Batches + Sales + Purchases + Udhar Khata → USB Ready</p>
             <p className="text-[10px] opacity-75 mt-1">Last backup: {lastBackup || "Never"} • {products.length} medicines • {reports.all.count} sales</p>
           </div>
           <div className="flex gap-2 items-center">
@@ -269,7 +354,7 @@ export default function MainDashboard() {
           </div>
         </div>
         <input ref={fileInputRef} type="file" accept=".json" onChange={handleRestore} className="hidden" />
-        <p className="text-[9px] opacity-70 mt-2">💡 Tip: Auto saves daily at 11 PM to Downloads. Also send file to your WhatsApp for safety.</p>
+        <p className="text-[9px] opacity-70 mt-2">💡 Click Full Backup → Choose USB Drive (E:). Auto saves daily at 11 PM to Downloads.</p>
       </div>
       <div className="flex items-center gap-2.5 mb-1"><Image src="/logo.png" unoptimized alt="logo" width={36} height={36} className="w-9 h-9 rounded-full border-2 border-green-700 shadow-sm" /><h1 className="text-[18px] sm:text-2xl font-bold">💊 Yasir Medical Store</h1></div>
       <p className="text-[11px] text-green-700 font-bold mb-1">Yasir Medical - Medicines Wholesale & Retail</p>
