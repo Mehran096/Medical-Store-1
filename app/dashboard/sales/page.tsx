@@ -483,40 +483,87 @@ export default function SalesPage() {
   const handleDeleteSale = async (id: string) => {
     if (deletingId) return;
     if (!confirm("Delete sale and restore stock?")) return;
+
+    // 1. CHECK
     const saleToDelete = sales.find((s) => s._id === id);
     if (!saleToDelete) return;
     const restore = rnd6(saleToDelete.deductionMain ?? 0);
     setDeletingId(id);
+
+    // 2. UPDATE SALES LIST
     setSales(prev => prev.filter(s => s._id !== id));
     setTotal(t => rnd6(Math.max(0, t - saleToDelete.total)));
     setProfit(pr => rnd6(Math.max(0, pr - saleToDelete.profit)));
-    if (saleToDelete.status==="pending") setPendingTotal(pt => rnd6(Math.max(0, pt - saleToDelete.total)));
+    if (saleToDelete.status === "pending") {
+      setPendingTotal(pt => rnd6(Math.max(0, pt - saleToDelete.total)));
+    }
+
+    // 3. UPDATE PRINT BILL (V63 POS top bar) - THIS WAS MISSING
+    setLastBill(prev => {
+      if (!prev) return null;
+      let removed = false;
+      const filtered = prev.items.filter(it => {
+        if (!removed && it.name === saleToDelete.productName) {
+          removed = true;
+          return false;
+        }
+        return true;
+      });
+      if (filtered.length === 0) {
+        setShowPrint(false);
+        return null;
+      }
+      const newTotal = rnd6(filtered.reduce((a, b) => a + b.total, 0));
+      return { ...prev, items: filtered, total: newTotal };
+    });
+
+    // 4. RESTORE STOCK - only matching batchNo
     setProducts(prev => prev.map(prod => {
       if (prod._id !== saleToDelete.productId) return prod;
-      return { ...prod, stock: rnd6(prod.stock + restore), batches: prod.batches?.map(b => ({ ...b, quantity: rnd6(b.quantity + restore) })) };
+      const updatedBatches = prod.batches?.map(b => {
+        if (saleToDelete.batchNo) {
+          if (b.batchNo === saleToDelete.batchNo) {
+            return { ...b, quantity: rnd6(b.quantity + restore) };
+          }
+          return b;
+        }
+        // old sales without batchNo - restore to batch matching sale batchNo logic fallback
+        return { ...b, quantity: rnd6(b.quantity + restore) };
+      });
+      return { ...prod, stock: rnd6(prod.stock + restore), batches: updatedBatches };
     }));
+
     try {
       if (id.startsWith("local_")) {
         const s = await offlineDB.sales.get(id) || await offlineDB.sales.where("localId").equals(id).first();
-        if (!s) { setPendingCount(c => Math.max(0, c - 1)); return; }
+        if (!s) {
+          setPendingCount(c => Math.max(0, c - 1));
+          return;
+        }
         if (s.batchId) {
           const b = await offlineDB.batches.where("localId").equals(s.batchId).first();
-          if (b) await offlineDB.batches.update(b.localId, { quantity: rnd6(b.quantity + restore) });
+          if (b) {
+            await offlineDB.batches.update(b.localId, { quantity: rnd6(b.quantity + restore) });
+          }
         }
         await offlineDB.sales.where("localId").equals(s.localId).delete();
         const remainingBatches = await offlineDB.batches.where("productId").equals(saleToDelete.productId).toArray();
-        const sum = rnd6(remainingBatches.reduce((a,b)=>a+b.quantity,0));
-        await offlineDB.products.where("localId").equals(saleToDelete.productId).or("_id").equals(saleToDelete.productId).modify(p=>{ p.stock = sum; });
+        const sum = rnd6(remainingBatches.reduce((a, b) => a + b.quantity, 0));
+        await offlineDB.products.where("localId").equals(saleToDelete.productId).or("_id").equals(saleToDelete.productId).modify(p => {
+          p.stock = sum;
+        });
         setPendingCount(c => Math.max(0, c - 1));
       } else {
         const res = await fetch(`/api/sales/${id}`, { method: "DELETE" });
-        if (!res.ok) throw new Error((await res.json()).error || "Delete failed");
+        if (!res.ok) throw new Error((await res.json() as { error: string }).error || "Delete failed");
         void refreshSalesOnly();
       }
     } catch (e) {
       const msg = (e as Error).message;
       if (!msg.includes("_id") && msg !== "Already deleted") alert(msg);
-    } finally { setDeletingId(null); }
+    } finally {
+      setDeletingId(null);
+    }
   };
 
   const handleDiscard = async (n: Product) => {
